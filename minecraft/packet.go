@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
 
@@ -63,8 +65,18 @@ func (p *packetData) decode(conn *Conn) (pks []packet.Packet, err error) {
 		}
 	}()
 
-	r := conn.proto.NewReader(p.payload, conn.shieldID.Load(), conn.readerLimits)
-	pk.Marshal(r)
+	if request, ok := pk.(*packet.SubChunkRequest); ok {
+		decoded, decodeErr := decodeSubChunkRequest(p.payload.Bytes(), conn)
+		if decodeErr != nil {
+			err = fmt.Errorf("decode packet %T: %w", pk, decodeErr)
+		} else {
+			*request = *decoded
+			p.payload.Next(p.payload.Len())
+		}
+	} else {
+		r := conn.proto.NewReader(p.payload, conn.shieldID.Load(), conn.readerLimits)
+		pk.Marshal(r)
+	}
 	if p.payload.Len() != 0 {
 		err = fmt.Errorf("decode packet %T: %v unread bytes left: 0x%x", pk, p.payload.Len(), p.payload.Bytes())
 	}
@@ -72,4 +84,45 @@ func (p *packetData) decode(conn *Conn) (pks []packet.Packet, err error) {
 		return nil, err
 	}
 	return conn.proto.ConvertToLatest(pk, conn), err
+}
+
+// decodeSubChunkRequest accepts both layouts used by protocol 1001 clients.
+// The 1.26.30 layout places the offset list before a fixed-width position,
+// while some patch clients still send the former varint position first.
+func decodeSubChunkRequest(data []byte, conn *Conn) (*packet.SubChunkRequest, error) {
+	request, currentErr := tryDecodeSubChunkRequest(data, conn, false)
+	if currentErr == nil {
+		return request, nil
+	}
+	request, legacyErr := tryDecodeSubChunkRequest(data, conn, true)
+	if legacyErr == nil {
+		return request, nil
+	}
+	return nil, fmt.Errorf("unsupported layout (current: %v; legacy: %v), payload=0x%x", currentErr, legacyErr, data)
+}
+
+func tryDecodeSubChunkRequest(data []byte, conn *Conn, legacy bool) (request *packet.SubChunkRequest, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("%v", recovered)
+		}
+	}()
+
+	buf := bytes.NewBuffer(data)
+	io := conn.proto.NewReader(buf, conn.shieldID.Load(), conn.readerLimits)
+	request = &packet.SubChunkRequest{}
+	io.Varint32(&request.Dimension)
+	if legacy {
+		io.SubChunkPos(&request.Position)
+		protocol.SliceUint32Length(io, &request.Offsets)
+	} else {
+		protocol.Slice(io, &request.Offsets)
+		io.Int32(&request.Position[0])
+		io.Int32(&request.Position[1])
+		io.Int32(&request.Position[2])
+	}
+	if buf.Len() != 0 {
+		return nil, fmt.Errorf("%d unread bytes", buf.Len())
+	}
+	return request, nil
 }
