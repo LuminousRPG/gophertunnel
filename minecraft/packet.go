@@ -77,7 +77,7 @@ func (p *packetData) decode(conn *Conn) (pks []packet.Packet, err error) {
 		r := conn.proto.NewReader(p.payload, conn.shieldID.Load(), conn.readerLimits)
 		pk.Marshal(r)
 	}
-	if p.payload.Len() != 0 {
+	if err == nil && p.payload.Len() != 0 {
 		err = fmt.Errorf("decode packet %T: %v unread bytes left: 0x%x", pk, p.payload.Len(), p.payload.Bytes())
 	}
 	if conn.disconnectOnInvalidPacket && err != nil {
@@ -112,11 +112,32 @@ func tryDecodeSubChunkRequest(data []byte, conn *Conn, legacy bool) (request *pa
 	io := conn.proto.NewReader(buf, conn.shieldID.Load(), conn.readerLimits)
 	request = &packet.SubChunkRequest{}
 	io.Varint32(&request.Dimension)
+
+	var count uint32
 	if legacy {
 		io.SubChunkPos(&request.Position)
-		protocol.SliceUint32Length(io, &request.Offsets)
+		io.Uint32(&count)
 	} else {
-		protocol.Slice(io, &request.Offsets)
+		io.Varuint32(&count)
+	}
+
+	// SubChunkRequest may legitimately contain more offsets than the generic
+	// slice limit (1024). Validate the count against the exact payload size
+	// before allocating so large, valid requests remain safe to decode.
+	trailingBytes := uint64(0)
+	if !legacy {
+		trailingBytes = 12 // Three fixed-width int32 position components.
+	}
+	expectedBytes := uint64(count)*3 + trailingBytes
+	if expectedBytes != uint64(buf.Len()) {
+		return nil, fmt.Errorf("offset count %d requires %d bytes, have %d", count, expectedBytes, buf.Len())
+	}
+
+	request.Offsets = make([]protocol.SubChunkOffset, count)
+	for i := range request.Offsets {
+		request.Offsets[i].Marshal(io)
+	}
+	if !legacy {
 		io.Int32(&request.Position[0])
 		io.Int32(&request.Position[1])
 		io.Int32(&request.Position[2])
