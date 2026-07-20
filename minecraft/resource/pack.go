@@ -270,6 +270,16 @@ func (pack Pack) WithContentKey(key string) *Pack {
 	return &pack
 }
 
+// WithDownloadURL creates a copy of the pack with its download URL set to the url passed, after which the new
+// Pack is returned. This allows a Pack compiled from a local path (ReadPath/ReadURL) to be advertised to
+// clients with an external HTTP(S) URL, without re-downloading the pack's own content from that URL: the
+// content, checksum and size used in the protocol are still the ones read locally, only the advertised
+// DownloadURL changes. If url is empty, the client falls back to downloading the pack over RakNet chunks.
+func (pack Pack) WithDownloadURL(url string) *Pack {
+	pack.downloadURL = url
+	return &pack
+}
+
 // Manifest returns the manifest found in the manifest.json of the resource pack. It contains information
 // about the pack such as its name.
 func (pack *Pack) Manifest() Manifest {
