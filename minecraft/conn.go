@@ -1055,6 +1055,7 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 		return conn.close(conn.closeErr("resource pack refused"))
 	case packet.PackResponseSendPacks:
 		packs := pk.PacksToDownload
+		conn.log.Info("client requested resource packs to download", "packs", packs)
 		conn.packQueue = &resourcePackQueue{packs: conn.resourcePacks}
 		if err := conn.packQueue.Request(packs); err != nil {
 			return fmt.Errorf("lookup resource packs by UUID: %w", err)
@@ -1157,6 +1158,7 @@ func (conn *Conn) nextResourcePackDownload() error {
 	if !ok {
 		return fmt.Errorf("no resource packs to download")
 	}
+	conn.log.Info("starting resource pack download", "UUID", pk.UUID, "chunkCount", pk.ChunkCount, "size", pk.Size)
 	if err := conn.WritePacket(pk); err != nil {
 		return fmt.Errorf("send ResourcePackDataInfo: %w", err)
 	}
@@ -1296,7 +1298,12 @@ func (conn *Conn) handleResourcePackChunkRequest(pk *packet.ResourcePackChunkReq
 	}
 
 	conn.packQueue.servedChunks[chunkIndex] = struct{}{}
-	if uint32(len(conn.packQueue.servedChunks)) == conn.packQueue.currentChunkCount {
+	served := uint32(len(conn.packQueue.servedChunks))
+	if served%200 == 0 {
+		conn.log.Info("resource pack download progress", "UUID", pk.UUID, "served", served, "chunkCount", conn.packQueue.currentChunkCount)
+	}
+	if served == conn.packQueue.currentChunkCount {
+		conn.log.Info("finished resource pack download", "UUID", pk.UUID, "chunkCount", conn.packQueue.currentChunkCount)
 		if !conn.packQueue.AllDownloaded() {
 			return conn.nextResourcePackDownload()
 		}
