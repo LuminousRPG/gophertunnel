@@ -1267,37 +1267,41 @@ func (conn *Conn) handleResourcePackChunkRequest(pk *packet.ResourcePackChunkReq
 	if current.UUID().String() != uuid {
 		return fmt.Errorf("expected pack UUID %v, but got %v", current.UUID(), pk.UUID)
 	}
-	if conn.packQueue.currentOffset != uint64(pk.ChunkIndex)*packChunkSize {
-		return fmt.Errorf("expected pack UUID %v, but got %v", conn.packQueue.currentOffset/packChunkSize, pk.ChunkIndex)
+	// Chunks are addressed by index rather than tracked through a single
+	// running offset: real clients don't guarantee requesting chunks in
+	// strict, gapless order (retransmits and prefetching are common on
+	// high-latency/mobile connections), so any in-bounds index is accepted
+	// rather than only the one that was expected next.
+	if pk.ChunkIndex < 0 || uint32(pk.ChunkIndex) >= conn.packQueue.currentChunkCount {
+		return fmt.Errorf("out of bounds resource pack chunk request: index %v, chunk count %v", pk.ChunkIndex, conn.packQueue.currentChunkCount)
 	}
+	chunkIndex := uint32(pk.ChunkIndex)
+	offset := uint64(chunkIndex) * packChunkSize
 	response := &packet.ResourcePackChunkData{
 		UUID:       pk.UUID,
-		ChunkIndex: uint32(pk.ChunkIndex),
-		DataOffset: conn.packQueue.currentOffset,
+		ChunkIndex: chunkIndex,
+		DataOffset: offset,
 		Data:       make([]byte, packChunkSize),
 	}
-	conn.packQueue.currentOffset += packChunkSize
 	// We read the data directly into the response's data.
-	if n, err := current.ReadAt(response.Data, int64(response.DataOffset)); err != nil {
-		// If we hit an EOF, we don't need to return an error, as we've simply reached the end of the content
-		// AKA the last chunk.
-		if err != io.EOF {
-			return fmt.Errorf("read resource pack chunk: %w", err)
-		}
-		response.Data = response.Data[:n]
-
-		defer func() {
-			if !conn.packQueue.AllDownloaded() {
-				_ = conn.nextResourcePackDownload()
-			} else {
-				conn.expect(packet.IDResourcePackClientResponse)
-			}
-		}()
+	n, err := current.ReadAt(response.Data, int64(offset))
+	if err != nil && err != io.EOF {
+		// An EOF here just means we've reached the end of the content, i.e. this is the last chunk.
+		return fmt.Errorf("read resource pack chunk: %w", err)
 	}
+	response.Data = response.Data[:n]
+
 	if err := conn.WritePacket(response); err != nil {
 		return fmt.Errorf("send ResourcePackChunkData: %w", err)
 	}
 
+	conn.packQueue.servedChunks[chunkIndex] = struct{}{}
+	if uint32(len(conn.packQueue.servedChunks)) == conn.packQueue.currentChunkCount {
+		if !conn.packQueue.AllDownloaded() {
+			return conn.nextResourcePackDownload()
+		}
+		conn.expect(packet.IDResourcePackClientResponse)
+	}
 	return nil
 }
 

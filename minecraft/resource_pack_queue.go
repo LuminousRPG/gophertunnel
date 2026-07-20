@@ -12,10 +12,17 @@ import (
 // resourcePackQueue is used to aid in the handling of resource pack queueing and downloading. Only one
 // resource pack is downloaded at a time.
 type resourcePackQueue struct {
-	packs           []*resource.Pack
-	packsToDownload map[string]*resource.Pack
-	currentPack     *resource.Pack
-	currentOffset   uint64
+	packs             []*resource.Pack
+	packsToDownload   map[string]*resource.Pack
+	currentPack       *resource.Pack
+	currentChunkCount uint32
+	// servedChunks tracks, by index, which chunks of currentPack have already
+	// been sent to the client. A real client's chunk requests aren't
+	// guaranteed to arrive in strict, gapless order (retransmits and
+	// prefetching are common on high-latency/mobile connections), so
+	// completion is measured by how many distinct chunks were served rather
+	// than by waiting for a specific offset to come in next.
+	servedChunks map[uint32]struct{}
 
 	packAmount       int
 	downloadingPacks map[string]downloadingPack
@@ -61,7 +68,8 @@ func (queue *resourcePackQueue) NextPack() (pk *packet.ResourcePackDataInfo, ok 
 		delete(queue.packsToDownload, index)
 
 		queue.currentPack = pack
-		queue.currentOffset = 0
+		queue.currentChunkCount = uint32(pack.DataChunkCount(packChunkSize))
+		queue.servedChunks = make(map[uint32]struct{}, queue.currentChunkCount)
 		checksum := pack.Checksum()
 
 		var packType byte
@@ -80,7 +88,7 @@ func (queue *resourcePackQueue) NextPack() (pk *packet.ResourcePackDataInfo, ok 
 		return &packet.ResourcePackDataInfo{
 			UUID:          pack.UUID().String() + "_" + pack.Version(),
 			DataChunkSize: packChunkSize,
-			ChunkCount:    uint32(pack.DataChunkCount(packChunkSize)),
+			ChunkCount:    queue.currentChunkCount,
 			Size:          uint64(pack.Len()),
 			Hash:          checksum[:],
 			PackType:      packType,
