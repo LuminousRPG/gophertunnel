@@ -466,6 +466,16 @@ func (listener *Listener) handleConn(conn *Conn) {
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
 				conn.log.Error(err.Error())
+			} else if !conn.loggedIn {
+				// A silent net.ErrClosed here (as opposed to a decode/handling
+				// error, which is logged above) means our own side already
+				// called Close on this connection before this read - most
+				// likely the RakNet layer's own inactivity timeout, not
+				// anything the client did. Log it (only pre-login, to avoid
+				// noise on every ordinary player disconnect) so it's visible
+				// instead of indistinguishable from a client that never
+				// connected at all.
+				conn.log.Info("connection closed before login completed (net.ErrClosed - likely local timeout/close, not a client-reported reason)")
 			}
 			return
 		}
