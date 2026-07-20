@@ -24,7 +24,16 @@ func (r RakNet) PingContext(ctx context.Context, address string) (response []byt
 
 // Listen ...
 func (r RakNet) Listen(address string) (NetworkListener, error) {
-	return raknet.ListenConfig{ErrorLog: r.l.With("net origin", "raknet")}.Listen(address)
+	return raknet.ListenConfig{
+		ErrorLog: r.l.With("net origin", "raknet"),
+		// Capped conservatively below the common real-world path MTU floor
+		// (e.g. some mobile carrier NAT/tunnelling paths silently black-hole
+		// larger UDP datagrams instead of returning ICMP fragmentation-needed
+		// errors, which RakNet's MTU discovery can't detect). This trades a
+		// little more fragmentation for connections that would otherwise
+		// have data go missing above their real path MTU.
+		MaxMTU: 1200,
+	}.Listen(address)
 }
 
 // init registers the RakNet network.
