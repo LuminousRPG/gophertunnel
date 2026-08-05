@@ -734,6 +734,8 @@ func (conn *Conn) handlePacket(pk packet.Packet) error {
 		return conn.handleRequestChunkRadius(pk)
 	case *packet.SetLocalPlayerAsInitialised:
 		return conn.handleSetLocalPlayerAsInitialised(pk)
+	case *packet.ServerBoundLoadingScreen:
+		return conn.handleServerBoundLoadingScreen(pk)
 
 	// Internal packets destined for the client.
 	case *packet.NetworkSettings:
@@ -1434,7 +1436,9 @@ func (conn *Conn) handleRequestChunkRadius(pk *packet.RequestChunkRadius) error 
 	if pk.ChunkRadius < 1 {
 		return fmt.Errorf("expected chunk radius of at least 1, got %v", pk.ChunkRadius)
 	}
-	conn.expect(packet.IDSetLocalPlayerAsInitialised)
+	// A 1.26.40 client reports being in the world by closing its loading screen rather than by sending
+	// SetLocalPlayerAsInitialised, so accept either as the signal that spawning finished.
+	conn.expect(packet.IDSetLocalPlayerAsInitialised, packet.IDServerBoundLoadingScreen)
 	radius := pk.ChunkRadius
 	if r := conn.gameData.ChunkRadius; r != 0 {
 		radius = r
@@ -1469,6 +1473,23 @@ func (conn *Conn) handleSetLocalPlayerAsInitialised(pk *packet.SetLocalPlayerAsI
 		return fmt.Errorf("entity runtime ID mismatch: expected %v (from StartGame), got %v", conn.gameData.EntityRuntimeID, pk.EntityRuntimeID)
 	}
 	if conn.waitingForSpawn.CompareAndSwap(true, false) {
+		close(conn.spawn)
+	}
+	return nil
+}
+
+// handleServerBoundLoadingScreen handles the client reporting that its loading screen closed. Mojang's docs
+// describe the initial load into a world as sending this with no loading screen ID, and a 1.26.40 client sends
+// it in place of SetLocalPlayerAsInitialised once it is in the world. Treating it as a spawn signal too keeps
+// the connection from waiting on a packet that never arrives, which leaves the caller blocked in StartGame and
+// the client on a world it is never sent.
+func (conn *Conn) handleServerBoundLoadingScreen(pk *packet.ServerBoundLoadingScreen) error {
+	if _, ok := pk.LoadingScreenID.Value(); ok {
+		// Carries an ID, so it belongs to a loading screen the server asked for (a dimension change) rather
+		// than to the initial load into the world, and says nothing about spawning.
+		return nil
+	}
+	if pk.Type == packet.LoadingScreenTypeEnd && conn.waitingForSpawn.CompareAndSwap(true, false) {
 		close(conn.spawn)
 	}
 	return nil
