@@ -163,6 +163,9 @@ type Conn struct {
 	// forceDisableVibrantVisuals specifies whether the connection is forced to have vibrant visuals disabled.
 	forceDisableVibrantVisuals bool
 	packQueue                  *resourcePackQueue
+	// lastPackChunk is when the previous ResourcePackChunkData packet was sent. It is
+	// only read and written from the goroutine handling incoming packets.
+	lastPackChunk time.Time
 	// downloadResourcePack is an optional function passed to a Dial() call. If set, each resource pack received
 	// from the server will call this function to see if it should be downloaded or not.
 	downloadResourcePack func(id uuid.UUID, version string, currentPack, totalPacks int) bool
@@ -1051,10 +1054,19 @@ func (conn *Conn) hasPack(uuid string, version string, hasBehaviours bool) bool 
 const (
 	// packChunkSize is the size of a single chunk of data from a resource pack: 128 KiB.
 	packChunkSize = 1024 * 128
-	// resourcePackChunkSendDelay spaces ResourcePackChunkData packets so slow clients are not flooded while
-	// downloading packs. Clients after 1.26.30 may fail resource pack downloads when pack chunks are sent
-	// too aggressively.
-	resourcePackChunkSendDelay = 200 * time.Millisecond
+	// resourcePackChunkInterval is the minimum time between two ResourcePackChunkData packets sent to the
+	// same connection. Clients after 1.26.30 may fail a resource pack download when chunks arrive faster
+	// than they can handle, and the RakNet layer below offers no backpressure to throttle against: a write
+	// splits the chunk into datagrams and returns, however far behind the client already is.
+	//
+	// This is a minimum interval rather than a delay after every chunk. A client paces its own download by
+	// only requesting the next chunks once it has handled the previous ones, and one that does so is never
+	// slowed down here; only a client that requests faster than this rate is made to wait.
+	//
+	// At 128 KiB per chunk the interval caps a download at roughly 12 MiB/s, which is above the bandwidth of
+	// most players and therefore leaves their own connection as the limit. Raise it if clients start failing
+	// pack downloads again.
+	resourcePackChunkInterval = 10 * time.Millisecond
 )
 
 // handleResourcePackClientResponse handles an incoming resource pack client response packet. The packet is
@@ -1305,6 +1317,9 @@ func (conn *Conn) handleResourcePackChunkRequest(pk *packet.ResourcePackChunkReq
 	}
 	response.Data = response.Data[:n]
 
+	if err := conn.paceResourcePackChunk(); err != nil {
+		return err
+	}
 	if err := conn.WritePacket(response); err != nil {
 		return fmt.Errorf("send ResourcePackChunkData: %w", err)
 	}
@@ -1325,23 +1340,26 @@ func (conn *Conn) handleResourcePackChunkRequest(pk *packet.ResourcePackChunkReq
 		}
 		conn.expect(packet.IDResourcePackClientResponse)
 	}
-	// Pace the chunks so clients after 1.26.30 are not overwhelmed by the send
-	// rate.
-	if err := waitResourcePackChunkSendDelay(conn.ctx); err != nil {
-		return err
-	}
 	return nil
 }
 
-// waitResourcePackChunkSendDelay waits before processing the next resource pack chunk request.
-func waitResourcePackChunkSendDelay(ctx context.Context) error {
-	timer := time.NewTimer(resourcePackChunkSendDelay)
+// paceResourcePackChunk waits out whatever remains of resourcePackChunkInterval since the previous chunk was
+// sent, so that chunks leave at a bounded rate no matter how quickly the client asks for them. A client that
+// requests slower than the interval waits for nothing.
+func (conn *Conn) paceResourcePackChunk() error {
+	wait := resourcePackChunkInterval - time.Since(conn.lastPackChunk)
+	if wait <= 0 {
+		conn.lastPackChunk = time.Now()
+		return nil
+	}
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-conn.ctx.Done():
+		return conn.ctx.Err()
 	case <-timer.C:
+		conn.lastPackChunk = time.Now()
 		return nil
 	}
 }
