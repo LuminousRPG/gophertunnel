@@ -4,11 +4,9 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 )
 
-// These match ServerboundLoadingScreenPacketType in Mojang's 1.26.40 schema, which has exactly two values and
-// starts at zero. An earlier definition here led with an Unknown constant, putting both real values one too
-// high, so a client reporting that a loading screen had closed was read as reporting that one had opened.
 const (
-	LoadingScreenTypeStart = iota
+	LoadingScreenTypeUnknown = iota
+	LoadingScreenTypeStart
 	LoadingScreenTypeEnd
 )
 

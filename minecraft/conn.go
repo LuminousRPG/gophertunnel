@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -371,6 +372,22 @@ func (conn *Conn) DoSpawnContext(ctx context.Context) error {
 	}
 }
 
+// diagDroppedPackets names packet types that must not be sent, read once from LUMINOUS_DIAG_DROP as a comma
+// separated list. The caller's own drop filter cannot reach the packets written during login, because those
+// go out before it has a connection to filter on, which leaves StartGame, ItemRegistry, JigsawStructureData
+// and the rest of the login sequence untestable. Dropping one of those breaks the join, but the point is to
+// see whether the client's error changes: DisconnectFailReason 90 (BadPacket) naming a different packet, or
+// no longer being 90 at all, is what identifies the packet it cannot parse.
+var diagDroppedPackets = func() map[string]struct{} {
+	m := map[string]struct{}{}
+	for _, name := range strings.Split(os.Getenv("LUMINOUS_DIAG_DROP"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			m[name] = struct{}{}
+		}
+	}
+	return m
+}()
+
 // WritePacket encodes the packet passed and writes it to the Conn. The encoded data is buffered until the
 // next 20th of a second, after which the data is flushed and sent over the connection.
 func (conn *Conn) WritePacket(pk packet.Packet) error {
@@ -378,6 +395,13 @@ func (conn *Conn) WritePacket(pk packet.Packet) error {
 	case <-conn.ctx.Done():
 		return conn.closeErr("write packet")
 	default:
+	}
+	if len(diagDroppedPackets) > 0 {
+		name := strings.TrimPrefix(fmt.Sprintf("%T", pk), "*packet.")
+		if _, drop := diagDroppedPackets[name]; drop {
+			conn.log.Info("dropping packet for diagnosis", "type", name)
+			return nil
+		}
 	}
 	conn.sendMu.Lock()
 	defer conn.sendMu.Unlock()
@@ -1436,8 +1460,9 @@ func (conn *Conn) handleRequestChunkRadius(pk *packet.RequestChunkRadius) error 
 	if pk.ChunkRadius < 1 {
 		return fmt.Errorf("expected chunk radius of at least 1, got %v", pk.ChunkRadius)
 	}
-	// A 1.26.40 client reports being in the world by closing its loading screen rather than by sending
-	// SetLocalPlayerAsInitialised, so accept either as the signal that spawning finished.
+	// 1.26.40 clients may close the initial loading screen instead of sending
+	// SetLocalPlayerAsInitialised, so accept either as the signal that the
+	// connection can be handed to the session layer.
 	conn.expect(packet.IDSetLocalPlayerAsInitialised, packet.IDServerBoundLoadingScreen)
 	radius := pk.ChunkRadius
 	if r := conn.gameData.ChunkRadius; r != 0 {
@@ -1472,9 +1497,7 @@ func (conn *Conn) handleSetLocalPlayerAsInitialised(pk *packet.SetLocalPlayerAsI
 	if pk.EntityRuntimeID != conn.gameData.EntityRuntimeID {
 		return fmt.Errorf("entity runtime ID mismatch: expected %v (from StartGame), got %v", conn.gameData.EntityRuntimeID, pk.EntityRuntimeID)
 	}
-	if conn.waitingForSpawn.CompareAndSwap(true, false) {
-		close(conn.spawn)
-	}
+	conn.finaliseSpawn(false)
 	return nil
 }
 
@@ -1489,10 +1512,20 @@ func (conn *Conn) handleServerBoundLoadingScreen(pk *packet.ServerBoundLoadingSc
 		// than to the initial load into the world, and says nothing about spawning.
 		return nil
 	}
-	if pk.Type == packet.LoadingScreenTypeEnd && conn.waitingForSpawn.CompareAndSwap(true, false) {
-		close(conn.spawn)
+	if pk.Type == packet.LoadingScreenTypeEnd {
+		conn.finaliseSpawn(false)
 	}
 	return nil
+}
+
+func (conn *Conn) finaliseSpawn(sendInitialised bool) {
+	if conn.waitingForSpawn.CompareAndSwap(true, false) {
+		conn.loggedIn = true
+		if sendInitialised {
+			_ = conn.WritePacket(&packet.SetLocalPlayerAsInitialised{EntityRuntimeID: conn.gameData.EntityRuntimeID})
+		}
+		close(conn.spawn)
+	}
 }
 
 // handlePlayStatus handles an incoming PlayStatus packet. It reacts differently depending on the status
@@ -1540,17 +1573,12 @@ func (conn *Conn) handlePlayStatus(pk *packet.PlayStatus) error {
 	}
 }
 
-// tryFinaliseClientConn attempts to finalise the client connection by sending
-// the SetLocalPlayerAsInitialised packet when if the ChunkRadiusUpdated and
-// PlayStatus packets have been sent.
+// tryFinaliseClientConn attempts to finalise the client connection when the
+// ChunkRadiusUpdated and PlayStatus packets have been sent.
 func (conn *Conn) tryFinaliseClientConn() {
 	if conn.waitingForSpawn.Load() && conn.gameDataReceived.Load() {
-		conn.waitingForSpawn.Store(false)
 		conn.gameDataReceived.Store(false)
-
-		close(conn.spawn)
-		conn.loggedIn = true
-		_ = conn.WritePacket(&packet.SetLocalPlayerAsInitialised{EntityRuntimeID: conn.gameData.EntityRuntimeID})
+		conn.finaliseSpawn(false)
 	}
 }
 
