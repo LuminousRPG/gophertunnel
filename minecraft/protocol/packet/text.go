@@ -62,20 +62,47 @@ func (*Text) ID() uint32 {
 	return IDText
 }
 
+// textTypeCategories lists, for each category, the text types it carries in the order Mojang's 1.26.40 schema
+// gives them (MessageOnly.json, AuthorAndMessage.json and MessageAndParams.json). The byte on the wire is the
+// index of the type *within its category*, not the TextType constant: chat is 0 rather than 1, and a type
+// like TextTypeSystem would otherwise be written as 6, past the end of the six entry list it belongs to.
+var textTypeCategories = [...][]byte{
+	TextCategoryMessageOnly:           {TextTypeRaw, TextTypeTip, TextTypeSystem, TextTypeObjectWhisper, TextTypeObject, TextTypeObjectAnnouncement},
+	TextCategoryAuthoredMessage:       {TextTypeChat, TextTypeWhisper, TextTypeAnnouncement},
+	TextCategoryMessageWithParameters: {TextTypeTranslation, TextTypePopup, TextTypeJukeboxPopup},
+}
+
+// textTypeIndex returns the category a text type belongs to and its index within that category.
+func textTypeIndex(textType byte) (category, index uint8) {
+	for c, types := range textTypeCategories {
+		for i, t := range types {
+			if t == textType {
+				return uint8(c), uint8(i)
+			}
+		}
+	}
+	return TextCategoryMessageOnly, 0
+}
+
 func (pk *Text) Marshal(io protocol.IO) {
 	io.Bool(&pk.NeedsTranslation)
 
-	var categoryType uint8
-	switch pk.TextType {
-	case TextTypeRaw, TextTypeTip, TextTypeSystem, TextTypeObjectWhisper, TextTypeObjectAnnouncement, TextTypeObject:
-		categoryType = TextCategoryMessageOnly
-	case TextTypeChat, TextTypeWhisper, TextTypeAnnouncement:
-		categoryType = TextCategoryAuthoredMessage
-	default:
-		categoryType = TextCategoryMessageWithParameters
-	}
+	// Both values are derived from the text type when writing and resolved back into it when reading, so the
+	// switch below sees the same type in either direction.
+	categoryType, index := textTypeIndex(pk.TextType)
 	io.Uint8(&categoryType)
-	io.Uint8(&pk.TextType)
+	io.Uint8(&index)
+	if int(categoryType) >= len(textTypeCategories) {
+		io.UnknownEnumOption(categoryType, "text category")
+		return
+	}
+	types := textTypeCategories[categoryType]
+	if int(index) >= len(types) {
+		io.UnknownEnumOption(index, "text type")
+		return
+	}
+	pk.TextType = types[index]
+
 	switch pk.TextType {
 	case TextTypeChat, TextTypeWhisper, TextTypeAnnouncement:
 		io.String(&pk.SourceName)
