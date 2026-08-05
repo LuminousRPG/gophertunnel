@@ -74,30 +74,99 @@ const (
 	CommandArgSoftEnum = 0x4000000
 )
 
-// These are the command parameter type IDs the Minecraft client expects on the wire (the classic sparse
-// scheme, stable across Bedrock releases). They must NOT be a dense iota sequence: the client maps unknown
-// IDs to "unknown", e.g. value 2 has no type, so binding CommandArgTypeFloat to 2 makes float parameters show
-// up as <name: unknown> client-side while int (1) still works. Float is 3, not 2.
 const (
-	CommandArgTypeInt             = 1
-	CommandArgTypeFloat           = 3
-	CommandArgTypeValue           = 4
-	CommandArgTypeWildcardInt     = 5
-	CommandArgTypeOperator        = 6
-	CommandArgTypeCompareOperator = 7
-	CommandArgTypeTarget          = 8
-	CommandArgTypeWildcardTarget  = 10
-	CommandArgTypeFilepath        = 17
-	CommandArgTypeIntegerRange    = 23
-	CommandArgTypeEquipmentSlots  = 47
-	CommandArgTypeString          = 56
-	CommandArgTypeBlockPosition   = 64
-	CommandArgTypePosition        = 65
-	CommandArgTypeMessage         = 67
-	CommandArgTypeRawText         = 70
-	CommandArgTypeJSON            = 74
-	CommandArgTypeBlockStates     = 83
-	CommandArgTypeCommand         = 86
+	CommandArgTypeInt = iota + 1
+	CommandArgTypeFloat
+	CommandArgTypeValue
+	CommandArgTypeRValue
+	CommandArgTypeWildcardInt
+	CommandArgTypeOperator
+	CommandArgTypeCompareOperator
+	CommandArgTypeTarget
+	CommandArgTypeStandaloneTarget
+	CommandArgTypeWildcardTarget
+	CommandArgTypeNonIDTarget
+	CommandArgTypeScoreArg
+	CommandArgTypeScoreArgs
+	CommandArgTypeScoreSelectParam
+	CommandArgTypeScoreSelector
+	CommandArgTypeTagSelector
+	CommandArgTypeFilepath
+	CommandArgTypeFilePathVal
+	CommandArgTypeFilePathCont
+	CommandArgTypeIntRangeVal
+	CommandArgTypeIntRangePostVal
+	CommandArgTypeIntRange
+	CommandArgTypeIntegerRange
+	CommandArgTypeRationalRangeVal
+	CommandArgTypeRationalRangePostVal
+	CommandArgTypeRationalRange
+	CommandArgTypeRationalRangeFull
+	CommandArgTypeSelectionArgs
+	CommandArgTypeArgs
+	CommandArgTypeArg
+	CommandArgTypeMArg
+	CommandArgTypeMValue
+	CommandArgTypeName
+	CommandArgTypeType
+	CommandArgTypeFamily
+	CommandArgTypePermission
+	CommandArgTypePermissions
+	CommandArgTypePermissionSelector
+	CommandArgTypePermissionElement
+	CommandArgTypePermissionElements
+	CommandArgTypeTag
+	CommandArgTypeHasItemElement
+	CommandArgTypeHasItemElements
+	CommandArgTypeHasItem
+	CommandArgTypeHasItems
+	CommandArgTypeHasItemSelector
+	CommandArgTypeEquipmentSlots
+	CommandArgTypePropertyValue
+	CommandArgTypeHasPropertyParamValue
+	CommandArgTypeHasPropertyParamEnumValue
+	CommandArgTypeHasPropertyArg
+	CommandArgTypeHasPropertyArgs
+	CommandArgTypeHasPropertyElement
+	CommandArgTypeHasPropertyElements
+	CommandArgTypeHasPropertySelector
+	CommandArgTypeString
+	CommandArgTypeIDContinuation
+	CommandArgTypeCoordXInt
+	CommandArgTypeCoordYInt
+	CommandArgTypeCoordZInt
+	CommandArgTypeCoordXFloat
+	CommandArgTypeCoordYFloat
+	CommandArgTypeCoordZFloat
+	CommandArgTypeBlockPosition
+	CommandArgTypePosition
+	CommandArgTypeMessageXP
+	CommandArgTypeMessage
+	CommandArgTypeMessageRoot
+	CommandArgTypePostSelector
+	CommandArgTypeRawText
+	CommandArgTypeTextContinuation
+	CommandArgTypeJSONValue
+	CommandArgTypeJSONField
+	CommandArgTypeJSON
+	CommandArgTypeJSONObjectFields
+	CommandArgTypeJSONObjectCont
+	CommandArgTypeJSONArray
+	CommandArgTypeJSONArrayValues
+	CommandArgTypeJSONArrayCont
+	CommandArgTypeBlockState
+	CommandArgTypeBlockStateKey
+	CommandArgTypeBlockStateValue
+	CommandArgTypeBlockStateValues
+	CommandArgTypeBlockStates
+	CommandArgTypeBlockStatesCont
+	CommandArgTypeClockTimeMarker
+	CommandArgTypeCommand
+	CommandArgTypeSlashCommand
+	CommandArgTypeCodeBuilderArg
+	CommandArgTypeCodeBuilderArgs
+	CommandArgTypeCodeBuilderSelectParam
+	CommandArgTypeCodeBuilderSelector
 
 	CommandArgTypeChainedCommand = 0x8000000
 )
