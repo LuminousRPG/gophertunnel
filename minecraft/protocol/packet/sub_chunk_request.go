@@ -8,11 +8,11 @@ import (
 type SubChunkRequest struct {
 	// Dimension is the dimension of the sub-chunk.
 	Dimension int32
+	// Offsets contains all requested offsets around the center point.
+	Offsets []protocol.SubChunkOffset
 	// Position is an absolute sub-chunk center point used as a base point for all sub-chunks requested. The X and Z
 	// coordinates represent the chunk coordinates, while the Y coordinate is the absolute sub-chunk index.
 	Position protocol.SubChunkPos
-	// Offsets contains all requested offsets around the center point.
-	Offsets []protocol.SubChunkOffset
 }
 
 // ID ...
@@ -20,8 +20,14 @@ func (*SubChunkRequest) ID() uint32 {
 	return IDSubChunkRequest
 }
 
+// Marshal follows SubChunkRequestPacketPayload in Mojang's 1.26.40 schema, which orders the fields Dimension
+// Type (0), SubChunk Position Offset List (1), Center Pos (2), with SubChunkPos being three plain int32s
+// rather than varints. An earlier local change here had the position before the offsets and encoded it as
+// varints, which is the pre-1.26.30 layout.
 func (pk *SubChunkRequest) Marshal(io protocol.IO) {
 	io.Varint32(&pk.Dimension)
-	io.SubChunkPos(&pk.Position)
-	protocol.SliceUint32Length(io, &pk.Offsets)
+	protocol.Slice(io, &pk.Offsets)
+	io.Int32(&pk.Position[0])
+	io.Int32(&pk.Position[1])
+	io.Int32(&pk.Position[2])
 }
