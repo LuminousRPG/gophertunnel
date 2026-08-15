@@ -12,21 +12,15 @@ import (
 // resourcePackQueue is used to aid in the handling of resource pack queueing and downloading. Only one
 // resource pack is downloaded at a time.
 type resourcePackQueue struct {
-	packs             []*resource.Pack
-	packsToDownload   map[string]*resource.Pack
-	currentPack       *resource.Pack
-	currentChunkCount uint32
-	// servedChunks tracks, by index, which chunks of currentPack have already
-	// been sent to the client. A real client's chunk requests aren't
-	// guaranteed to arrive in strict, gapless order (retransmits and
-	// prefetching are common on high-latency/mobile connections), so
-	// completion is measured by how many distinct chunks were served rather
-	// than by waiting for a specific offset to come in next.
-	servedChunks map[uint32]struct{}
+	packs           []*resource.Pack
+	packsToDownload map[string]*resource.Pack
+	currentPack     *resource.Pack
+	currentOffset   uint64
 
 	packAmount       int
 	downloadingPacks map[string]downloadingPack
 	awaitingPacks    map[string]*downloadingPack
+	chunkSize        uint32
 }
 
 // downloadingPack is a resource pack that is being downloaded by a client connection.
@@ -37,6 +31,7 @@ type downloadingPack struct {
 	expectedIndex uint32
 	newFrag       chan []byte
 	contentKey    string
+	cacheKey      ResourcePackCacheKey
 }
 
 // Request 'requests' all resource packs passed, provided they all exist in the resourcePackQueue. Clients
@@ -68,8 +63,7 @@ func (queue *resourcePackQueue) NextPack() (pk *packet.ResourcePackDataInfo, ok 
 		delete(queue.packsToDownload, index)
 
 		queue.currentPack = pack
-		queue.currentChunkCount = uint32(pack.DataChunkCount(packChunkSize))
-		queue.servedChunks = make(map[uint32]struct{}, queue.currentChunkCount)
+		queue.currentOffset = 0
 		checksum := pack.Checksum()
 
 		var packType byte
@@ -87,8 +81,8 @@ func (queue *resourcePackQueue) NextPack() (pk *packet.ResourcePackDataInfo, ok 
 		}
 		return &packet.ResourcePackDataInfo{
 			UUID:          pack.UUID().String() + "_" + pack.Version(),
-			DataChunkSize: packChunkSize,
-			ChunkCount:    queue.currentChunkCount,
+			DataChunkSize: queue.chunkSize,
+			ChunkCount:    uint32(pack.DataChunkCount(int(queue.chunkSize))),
 			Size:          uint64(pack.Len()),
 			Hash:          checksum[:],
 			PackType:      packType,

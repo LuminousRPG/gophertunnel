@@ -41,6 +41,10 @@ type exemptedResourcePack struct {
 // in the ResourcePackStack packet.
 var exemptedPacks = []exemptedResourcePack{
 	{
+		uuid:    "d34cfa4b-2ad1-453d-a0db-668b429a3ea0",
+		version: "1.26.40",
+	},
+	{
 		uuid:    "b41c2785-c512-4a49-af56-3a87afd47c57",
 		version: "1.21.30",
 	},
@@ -163,9 +167,6 @@ type Conn struct {
 	// forceDisableVibrantVisuals specifies whether the connection is forced to have vibrant visuals disabled.
 	forceDisableVibrantVisuals bool
 	packQueue                  *resourcePackQueue
-	// lastPackChunk is when the previous ResourcePackChunkData packet was sent. It is
-	// only read and written from the goroutine handling incoming packets.
-	lastPackChunk time.Time
 	// downloadResourcePack is an optional function passed to a Dial() call. If set, each resource pack received
 	// from the server will call this function to see if it should be downloaded or not.
 	downloadResourcePack func(id uuid.UUID, version string, currentPack, totalPacks int) bool
@@ -175,6 +176,10 @@ type Conn struct {
 	// ignoredResourcePacks is a slice of resource packs that are not being downloaded due to the downloadResourcePack
 	// func returning false for the specific pack.
 	ignoredResourcePacks []exemptedResourcePack
+	// resourcePackCache, if set, stores resource packs downloaded by a Dialer for reuse on later logins.
+	resourcePackCache ResourcePackCache
+	// resourcePackDelivery controls how a Listener connection sends resource pack data.
+	resourcePackDelivery ResourcePackDeliveryConfig
 
 	cacheEnabled bool
 
@@ -213,6 +218,8 @@ func newConn(netConn net.Conn, key *ecdsa.PrivateKey, log *slog.Logger, proto Pr
 		hdr:          &packet.Header{},
 		proto:        proto,
 		readerLimits: limits,
+
+		resourcePackDelivery: defaultResourcePackDeliveryConfig(),
 	}
 	if d, ok := netConn.(packet.EncryptionDisabler); ok {
 		conn.disableEncryption = d.DisableEncryption()
@@ -659,7 +666,7 @@ func (conn *Conn) receive(data []byte) error {
 		if err != nil {
 			return err
 		}
-		_ = conn.close(conn.closeErr(pks[0].(*packet.Disconnect).Message))
+		_ = conn.close(conn.wrap(DisconnectError(pks[0].(*packet.Disconnect).Message), "receive"))
 		return nil
 	}
 	if conn.loggedIn && !conn.waitingForSpawn.Load() {
@@ -734,8 +741,6 @@ func (conn *Conn) handlePacket(pk packet.Packet) error {
 		return conn.handleRequestChunkRadius(pk)
 	case *packet.SetLocalPlayerAsInitialised:
 		return conn.handleSetLocalPlayerAsInitialised(pk)
-	case *packet.ServerBoundLoadingScreen:
-		return conn.handleServerBoundLoadingScreen(pk)
 
 	// Internal packets destined for the client.
 	case *packet.NetworkSettings:
@@ -988,6 +993,26 @@ func (conn *Conn) handleResourcePacksInfo(pk *packet.ResourcePacksInfo) error {
 			conn.packQueue.packAmount--
 			continue
 		}
+
+		cacheKey := ResourcePackCacheKey{
+			UUID:    pack.UUID,
+			Version: pack.Version,
+			Size:    pack.Size,
+		}
+		if conn.resourcePackCache != nil {
+			cachedPack, err := conn.resourcePackCache.Load(conn.ctx, cacheKey)
+			switch {
+			case err != nil:
+				conn.log.Warn("handle ResourcePacksInfo: failed to load resource pack from cache", "UUID", pack.UUID, "version", pack.Version, "err", err)
+			case cachedPack != nil && !cacheKey.Matches(cachedPack):
+				conn.log.Warn("handle ResourcePacksInfo: cached resource pack did not match advertised pack", "UUID", pack.UUID, "version", pack.Version, "cached_UUID", cachedPack.UUID(), "cached_version", cachedPack.Version(), "cached_size", cachedPack.Len())
+			case cachedPack != nil:
+				conn.resourcePacks = append(conn.resourcePacks, cachedPack.WithContentKey(pack.ContentKey))
+				conn.packQueue.packAmount--
+				continue
+			}
+		}
+
 		// This UUID_Version is a hack Mojang put in place.
 		packsToDownload = append(packsToDownload, id+"_"+pack.Version)
 		conn.packQueue.downloadingPacks[id] = downloadingPack{
@@ -995,6 +1020,7 @@ func (conn *Conn) handleResourcePacksInfo(pk *packet.ResourcePacksInfo) error {
 			buf:        bytes.NewBuffer(make([]byte, 0, pack.Size)),
 			newFrag:    make(chan []byte),
 			contentKey: pack.ContentKey,
+			cacheKey:   cacheKey,
 		}
 	}
 
@@ -1010,6 +1036,17 @@ func (conn *Conn) handleResourcePacksInfo(pk *packet.ResourcePacksInfo) error {
 
 	_ = conn.WritePacket(&packet.ResourcePackClientResponse{Response: packet.PackResponseAllPacksDownloaded})
 	return nil
+}
+
+// storeResourcePack stores a downloaded pack in the Conn's ResourcePackCache, if any.
+func (conn *Conn) storeResourcePack(key ResourcePackCacheKey, pack *resource.Pack) {
+	if conn.resourcePackCache == nil || !key.Matches(pack) {
+		// A pack that does not match its own key would never be returned as a hit on a later login.
+		return
+	}
+	if err := conn.resourcePackCache.Store(conn.ctx, key, pack); err != nil {
+		conn.log.Warn("failed to store resource pack in cache", "UUID", pack.UUID(), "version", pack.Version(), "err", err)
+	}
 }
 
 // handleResourcePackStack handles a ResourcePackStack packet sent by the server. The stack defines the order
@@ -1053,24 +1090,6 @@ func (conn *Conn) hasPack(uuid string, version string, hasBehaviours bool) bool 
 	return false
 }
 
-const (
-	// packChunkSize is the size of a single chunk of data from a resource pack: 128 KiB.
-	packChunkSize = 1024 * 128
-	// resourcePackChunkInterval is the minimum time between two ResourcePackChunkData packets sent to the
-	// same connection. Clients after 1.26.30 may fail a resource pack download when chunks arrive faster
-	// than they can handle, and the RakNet layer below offers no backpressure to throttle against: a write
-	// splits the chunk into datagrams and returns, however far behind the client already is.
-	//
-	// This is a minimum interval rather than a delay after every chunk. A client paces its own download by
-	// only requesting the next chunks once it has handled the previous ones, and one that does so is never
-	// slowed down here; only a client that requests faster than this rate is made to wait.
-	//
-	// At 128 KiB per chunk the interval caps a download at roughly 12 MiB/s, which is above the bandwidth of
-	// most players and therefore leaves their own connection as the limit. Raise it if clients start failing
-	// pack downloads again.
-	resourcePackChunkInterval = 10 * time.Millisecond
-)
-
 // handleResourcePackClientResponse handles an incoming resource pack client response packet. The packet is
 // handled differently depending on the response.
 func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClientResponse) error {
@@ -1081,8 +1100,10 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 		return conn.close(conn.closeErr("resource pack refused"))
 	case packet.PackResponseSendPacks:
 		packs := pk.PacksToDownload
-		conn.log.Info("client requested resource packs to download", "packs", packs)
-		conn.packQueue = &resourcePackQueue{packs: conn.resourcePacks}
+		conn.packQueue = &resourcePackQueue{
+			packs:     conn.resourcePacks,
+			chunkSize: conn.resourcePackDelivery.ChunkSize,
+		}
 		if err := conn.packQueue.Request(packs); err != nil {
 			return fmt.Errorf("lookup resource packs by UUID: %w", err)
 		}
@@ -1148,6 +1169,7 @@ func (conn *Conn) startGame() {
 		EmoteChatMuted:               data.EmoteChatMuted,
 		GameRules:                    data.GameRules,
 		Time:                         data.Time,
+		DayCycleLockTime:             data.DayCycleLockTime,
 		Blocks:                       data.CustomBlocks,
 		AchievementsDisabled:         true,
 		Generator:                    1,
@@ -1184,7 +1206,6 @@ func (conn *Conn) nextResourcePackDownload() error {
 	if !ok {
 		return fmt.Errorf("no resource packs to download")
 	}
-	conn.log.Info("starting resource pack download", "UUID", pk.UUID, "chunkCount", pk.ChunkCount, "size", pk.Size)
 	if err := conn.WritePacket(pk); err != nil {
 		return fmt.Errorf("send ResourcePackDataInfo: %w", err)
 	}
@@ -1240,25 +1261,30 @@ func (conn *Conn) handleResourcePackDataInfo(pk *packet.ResourcePackDataInfo) er
 			}
 		}
 		conn.packMu.Lock()
-		defer conn.packMu.Unlock()
-
 		if pack.buf.Len() != int(pack.size) {
 			conn.log.Error(fmt.Sprintf("download resource pack: incorrect resource pack size: expected %v, got %v", pack.size, pack.buf.Len()), "UUID", id)
+			conn.packMu.Unlock()
 			return
 		}
 		// First parse the resource pack from the total byte buffer we obtained.
 		newPack, err := resource.Read(pack.buf)
 		if err != nil {
 			conn.log.Error("download resource pack: invalid full resource pack data: "+err.Error(), "UUID", id)
+			conn.packMu.Unlock()
 			return
 		}
+		newPack = newPack.WithContentKey(pack.contentKey)
 		conn.packQueue.packAmount--
 		// Finally we add the resource to the resource packs slice.
-		conn.resourcePacks = append(conn.resourcePacks, newPack.WithContentKey(pack.contentKey))
-		if conn.packQueue.packAmount == 0 {
+		conn.resourcePacks = append(conn.resourcePacks, newPack)
+		packAmount := conn.packQueue.packAmount
+		conn.packMu.Unlock()
+
+		if packAmount == 0 {
 			conn.expect(packet.IDResourcePackStack)
 			_ = conn.WritePacket(&packet.ResourcePackClientResponse{Response: packet.PackResponseAllPacksDownloaded})
 		}
+		conn.storeResourcePack(pack.cacheKey, newPack)
 	}()
 	return nil
 }
@@ -1291,77 +1317,64 @@ func (conn *Conn) handleResourcePackChunkData(pk *packet.ResourcePackChunkData) 
 // pack to be downloaded.
 func (conn *Conn) handleResourcePackChunkRequest(pk *packet.ResourcePackChunkRequest) error {
 	current := conn.packQueue.currentPack
+	chunkSize := uint64(conn.packQueue.chunkSize)
 	uuid, _, _ := strings.Cut(pk.UUID, "_")
 	if current.UUID().String() != uuid {
 		return fmt.Errorf("expected pack UUID %v, but got %v", current.UUID(), pk.UUID)
 	}
-	// Chunks are addressed by index rather than tracked through a single
-	// running offset: real clients don't guarantee requesting chunks in
-	// strict, gapless order (retransmits and prefetching are common on
-	// high-latency/mobile connections), so any in-bounds index is accepted
-	// rather than only the one that was expected next.
-	if pk.ChunkIndex < 0 || uint32(pk.ChunkIndex) >= conn.packQueue.currentChunkCount {
-		return fmt.Errorf("out of bounds resource pack chunk request: index %v, chunk count %v", pk.ChunkIndex, conn.packQueue.currentChunkCount)
+	if conn.packQueue.currentOffset != uint64(pk.ChunkIndex)*chunkSize {
+		return fmt.Errorf("expected chunk index %v, but got %v", conn.packQueue.currentOffset/chunkSize, pk.ChunkIndex)
 	}
-	chunkIndex := uint32(pk.ChunkIndex)
-	offset := uint64(chunkIndex) * packChunkSize
 	response := &packet.ResourcePackChunkData{
 		UUID:       pk.UUID,
-		ChunkIndex: chunkIndex,
-		DataOffset: offset,
-		Data:       make([]byte, packChunkSize),
+		ChunkIndex: uint32(pk.ChunkIndex),
+		DataOffset: conn.packQueue.currentOffset,
+		Data:       make([]byte, chunkSize),
 	}
+	conn.packQueue.currentOffset += chunkSize
 	// We read the data directly into the response's data.
-	n, err := current.ReadAt(response.Data, int64(offset))
-	if err != nil && err != io.EOF {
-		// An EOF here just means we've reached the end of the content, i.e. this is the last chunk.
-		return fmt.Errorf("read resource pack chunk: %w", err)
-	}
-	response.Data = response.Data[:n]
-
-	if err := conn.paceResourcePackChunk(); err != nil {
-		return err
+	if n, err := current.ReadAt(response.Data, int64(response.DataOffset)); err != nil {
+		// If we hit an EOF, we don't need to return an error, as we've simply reached the end of the content
+		// AKA the last chunk.
+		if err != io.EOF {
+			return fmt.Errorf("read resource pack chunk: %w", err)
+		}
+		response.Data = response.Data[:n]
 	}
 	if err := conn.WritePacket(response); err != nil {
 		return fmt.Errorf("send ResourcePackChunkData: %w", err)
 	}
+	if err := conn.Flush(); err != nil {
+		return fmt.Errorf("flush ResourcePackChunkData: %w", err)
+	}
 
-	// Completion is tracked by the set of chunks actually served rather than by
-	// the offset of the last chunk: because out-of-order requests are accepted
-	// above, the highest offset may well arrive before the gaps before it have
-	// been filled.
-	conn.packQueue.servedChunks[chunkIndex] = struct{}{}
-	served := uint32(len(conn.packQueue.servedChunks))
-	if served%200 == 0 {
-		conn.log.Info("resource pack download progress", "UUID", pk.UUID, "served", served, "chunkCount", conn.packQueue.currentChunkCount)
-	}
-	if served == conn.packQueue.currentChunkCount {
-		conn.log.Info("finished resource pack download", "UUID", pk.UUID, "chunkCount", conn.packQueue.currentChunkCount)
+	lastChunk := response.DataOffset+uint64(len(response.Data)) >= uint64(current.Len())
+	if lastChunk {
 		if !conn.packQueue.AllDownloaded() {
-			return conn.nextResourcePackDownload()
+			_ = conn.nextResourcePackDownload()
+		} else {
+			conn.expect(packet.IDResourcePackClientResponse)
 		}
-		conn.expect(packet.IDResourcePackClientResponse)
 	}
+	if err := waitResourcePackChunkSendDelay(conn.ctx, conn.resourcePackDelivery.ChunkSendDelay); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-// paceResourcePackChunk waits out whatever remains of resourcePackChunkInterval since the previous chunk was
-// sent, so that chunks leave at a bounded rate no matter how quickly the client asks for them. A client that
-// requests slower than the interval waits for nothing.
-func (conn *Conn) paceResourcePackChunk() error {
-	wait := resourcePackChunkInterval - time.Since(conn.lastPackChunk)
-	if wait <= 0 {
-		conn.lastPackChunk = time.Now()
+// waitResourcePackChunkSendDelay waits before processing the next resource pack chunk request.
+func waitResourcePackChunkSendDelay(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(wait)
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
 	select {
-	case <-conn.ctx.Done():
-		return conn.ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-timer.C:
-		conn.lastPackChunk = time.Now()
 		return nil
 	}
 }
@@ -1395,6 +1408,7 @@ func (conn *Conn) handleStartGame(pk *packet.StartGame) error {
 		EmoteChatMuted:               pk.EmoteChatMuted,
 		GameRules:                    pk.GameRules,
 		Time:                         pk.Time,
+		DayCycleLockTime:             pk.DayCycleLockTime,
 		ServerBlockStateChecksum:     pk.ServerBlockStateChecksum,
 		CustomBlocks:                 pk.Blocks,
 		PlayerMovementSettings:       pk.PlayerMovementSettings,
@@ -1436,10 +1450,7 @@ func (conn *Conn) handleRequestChunkRadius(pk *packet.RequestChunkRadius) error 
 	if pk.ChunkRadius < 1 {
 		return fmt.Errorf("expected chunk radius of at least 1, got %v", pk.ChunkRadius)
 	}
-	// 1.26.40 clients may close the initial loading screen instead of sending
-	// SetLocalPlayerAsInitialised, so accept either as the signal that the
-	// connection can be handed to the session layer.
-	conn.expect(packet.IDSetLocalPlayerAsInitialised, packet.IDServerBoundLoadingScreen)
+	conn.expect(packet.IDSetLocalPlayerAsInitialised)
 	radius := pk.ChunkRadius
 	if r := conn.gameData.ChunkRadius; r != 0 {
 		radius = r
@@ -1473,35 +1484,10 @@ func (conn *Conn) handleSetLocalPlayerAsInitialised(pk *packet.SetLocalPlayerAsI
 	if pk.EntityRuntimeID != conn.gameData.EntityRuntimeID {
 		return fmt.Errorf("entity runtime ID mismatch: expected %v (from StartGame), got %v", conn.gameData.EntityRuntimeID, pk.EntityRuntimeID)
 	}
-	conn.finaliseSpawn(false)
-	return nil
-}
-
-// handleServerBoundLoadingScreen handles the client reporting that its loading screen closed. Mojang's docs
-// describe the initial load into a world as sending this with no loading screen ID, and a 1.26.40 client sends
-// it in place of SetLocalPlayerAsInitialised once it is in the world. Treating it as a spawn signal too keeps
-// the connection from waiting on a packet that never arrives, which leaves the caller blocked in StartGame and
-// the client on a world it is never sent.
-func (conn *Conn) handleServerBoundLoadingScreen(pk *packet.ServerBoundLoadingScreen) error {
-	if _, ok := pk.LoadingScreenID.Value(); ok {
-		// Carries an ID, so it belongs to a loading screen the server asked for (a dimension change) rather
-		// than to the initial load into the world, and says nothing about spawning.
-		return nil
-	}
-	if pk.Type == packet.LoadingScreenTypeEnd {
-		conn.finaliseSpawn(false)
-	}
-	return nil
-}
-
-func (conn *Conn) finaliseSpawn(sendInitialised bool) {
 	if conn.waitingForSpawn.CompareAndSwap(true, false) {
-		conn.loggedIn = true
-		if sendInitialised {
-			_ = conn.WritePacket(&packet.SetLocalPlayerAsInitialised{EntityRuntimeID: conn.gameData.EntityRuntimeID})
-		}
 		close(conn.spawn)
 	}
+	return nil
 }
 
 // handlePlayStatus handles an incoming PlayStatus packet. It reacts differently depending on the status
@@ -1549,12 +1535,17 @@ func (conn *Conn) handlePlayStatus(pk *packet.PlayStatus) error {
 	}
 }
 
-// tryFinaliseClientConn attempts to finalise the client connection when the
-// ChunkRadiusUpdated and PlayStatus packets have been sent.
+// tryFinaliseClientConn attempts to finalise the client connection by sending
+// the SetLocalPlayerAsInitialised packet when if the ChunkRadiusUpdated and
+// PlayStatus packets have been sent.
 func (conn *Conn) tryFinaliseClientConn() {
 	if conn.waitingForSpawn.Load() && conn.gameDataReceived.Load() {
+		conn.waitingForSpawn.Store(false)
 		conn.gameDataReceived.Store(false)
-		conn.finaliseSpawn(false)
+
+		close(conn.spawn)
+		conn.loggedIn = true
+		_ = conn.WritePacket(&packet.SetLocalPlayerAsInitialised{EntityRuntimeID: conn.gameData.EntityRuntimeID})
 	}
 }
 

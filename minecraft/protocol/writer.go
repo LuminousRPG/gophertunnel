@@ -134,11 +134,10 @@ func (w *Writer) ChunkPos(x *ChunkPos) {
 	w.Varint32(&x[1])
 }
 
-// SubChunkPos writes a SubChunkPos as 3 varint32s to the underlying buffer.
 func (w *Writer) SubChunkPos(x *SubChunkPos) {
-	w.Varint32(&x[0])
-	w.Varint32(&x[1])
-	w.Varint32(&x[2])
+	w.Int32(&x[0])
+	w.Int32(&x[1])
+	w.Int32(&x[2])
 }
 
 // SoundPos writes an mgl32.Vec3 that serves as a position for a sound.
@@ -163,22 +162,10 @@ func (w *Writer) RGBA(x *color.RGBA) {
 	w.Uint32(&val)
 }
 
-// ARGB writes a color.RGBA x as a int32 to the underlying buffer.
-func (w *Writer) ARGB(x *color.RGBA) {
-	val := int32(x.A) | int32(x.R)<<8 | int32(x.G)<<16 | int32(x.B)<<24
-	w.Int32(&val)
-}
-
 // BEARGB writes a color.RGBA x as a big endian int32 to the underlying buffer.
 func (w *Writer) BEARGB(x *color.RGBA) {
 	val := int32(x.A) | int32(x.R)<<8 | int32(x.G)<<16 | int32(x.B)<<24
 	w.BEInt32(&val)
-}
-
-// VarRGBA writes a color.RGBA x as a varuint32 to the underlying buffer.
-func (w *Writer) VarRGBA(x *color.RGBA) {
-	val := uint32(x.R) | uint32(x.G)<<8 | uint32(x.B)<<16 | uint32(x.A)<<24
-	w.Varuint32(&val)
 }
 
 // UUID writes a UUID to the underlying buffer.
@@ -193,13 +180,10 @@ func (w *Writer) UUID(x *uuid.UUID) {
 // PlayerInventoryAction writes a PlayerInventoryAction.
 func (w *Writer) PlayerInventoryAction(x *UseItemTransactionData) {
 	w.Varint32(&x.LegacyRequestID)
-	legacySlotsPresent := x.LegacyRequestID < -1 && (x.LegacyRequestID&1) == 0
-	w.Bool(&legacySlotsPresent)
-	if legacySlotsPresent {
-		Slice(w, &x.LegacySetItemSlots)
-	}
-	actions := Option(x.Actions)
-	DoubleOptionalFunc(w, &actions, func(actions *[]InventoryAction) {
+	OptionalFunc(w, &x.LegacySetItemSlots, func(slots *[]LegacySetItemSlot) {
+		Slice(w, slots)
+	})
+	DoubleOptionalFunc(w, &x.Actions, func(actions *[]InventoryAction) {
 		Slice(w, actions)
 	})
 	IntegerFunc(&x.ActionType, w.Varint32)
@@ -340,8 +324,7 @@ func (w *Writer) ItemInstance(i *ItemInstance) {
 		w.Varint32(&i.StackNetworkID)
 	}
 
-	runtimeID := uint32(x.BlockRuntimeID)
-	w.Varuint32(&runtimeID)
+	IntegerFunc(&x.BlockRuntimeID, w.Varuint32)
 	w.itemUserData(itemStackUserData(x), x.NetworkID != 0, x.NetworkID == w.shieldID)
 }
 
@@ -367,12 +350,10 @@ func (w *Writer) StackRequestItem(x *StackRequestItem) {
 	w.Uint8(&legacyVariant)
 	if hasItem {
 		w.String(&x.Identifier)
-		metadata := int32(x.MetadataValue)
-		w.Varint32(&metadata)
+		IntegerFunc(&x.MetadataValue, w.Varint32)
 	}
 	IntegerFunc(&x.Count, w.Int16)
-	runtimeID := uint32(x.BlockRuntimeID)
-	w.Varuint32(&runtimeID)
+	IntegerFunc(&x.BlockRuntimeID, w.Varuint32)
 	w.itemUserData(stackRequestItemUserData(x), hasItem, x.Identifier == "minecraft:shield")
 }
 
@@ -540,6 +521,41 @@ func (w *Writer) Varint64(x *int64) {
 		ux >>= 7
 	}
 	_ = w.w.WriteByte(byte(ux))
+}
+
+// ActorRuntimeID writes an entity runtime ID encoded as an unsigned varint.
+func (w *Writer) ActorRuntimeID(x *uint64) {
+	w.Varuint64(x)
+}
+
+// ActorRuntimeIDVarint64 writes an entity runtime ID encoded as a signed varint.
+func (w *Writer) ActorRuntimeIDVarint64(x *int64) {
+	w.Varint64(x)
+}
+
+// ActorRuntimeIDVaruint32 writes an entity runtime ID encoded as an unsigned 32-bit varint.
+func (w *Writer) ActorRuntimeIDVaruint32(x *uint32) {
+	w.Varuint32(x)
+}
+
+// ActorUniqueID writes an entity unique ID encoded as a signed varint.
+func (w *Writer) ActorUniqueID(x *int64) {
+	w.Varint64(x)
+}
+
+// ActorUniqueIDInt64 writes an entity unique ID encoded as a fixed-width signed integer.
+func (w *Writer) ActorUniqueIDInt64(x *int64) {
+	w.Int64(x)
+}
+
+// ActorUniqueIDUint64 writes an entity unique ID encoded as a fixed-width unsigned integer.
+func (w *Writer) ActorUniqueIDUint64(x *uint64) {
+	w.Uint64(x)
+}
+
+// ActorUniqueIDVaruint64 writes an entity unique ID encoded as an unsigned varint.
+func (w *Writer) ActorUniqueIDVaruint64(x *uint64) {
+	w.Varuint64(x)
 }
 
 // Varuint64 writes a uint64 as 1-10 bytes to the underlying buffer.

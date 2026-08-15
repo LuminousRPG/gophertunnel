@@ -238,9 +238,8 @@ func (x *ItemStackResponse) Marshal(r IO) {
 	DoubleOptionalFunc(r, &containerInfo, func(containerInfo *[]StackResponseContainerInfo) {
 		Slice(r, containerInfo)
 	})
-	var ok bool
-	if x.ContainerInfo, ok = containerInfo.Value(); !ok {
-		x.ContainerInfo = nil
+	if value, ok := containerInfo.Value(); ok {
+		x.ContainerInfo = value
 	}
 }
 
@@ -292,8 +291,6 @@ func (x *StackResponseSlotInfo) Marshal(r IO) {
 	DoubleOptionalFunc(r, &stackNetworkID, r.Varint32)
 	if value, ok := stackNetworkID.Value(); ok {
 		x.StackNetworkID = value
-	} else {
-		x.StackNetworkID = 0
 	}
 	r.String(&x.CustomName)
 	r.String(&x.FilteredCustomName)
@@ -318,8 +315,6 @@ const (
 	StackRequestActionDestroy
 	StackRequestActionConsume
 	StackRequestActionCreate
-	// StackRequestActionPlaceInContainer and StackRequestActionTakeOutContainer are never sent, but still
-	// take up their IDs in the action type the client repeats inside each action.
 	StackRequestActionPlaceInContainer
 	StackRequestActionTakeOutContainer
 	StackRequestActionLabTableCombine
