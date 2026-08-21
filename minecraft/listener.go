@@ -418,6 +418,7 @@ func (listener *Listener) createConn(netConn net.Conn) {
 	listener.packsMu.RUnlock()
 
 	conn := newConn(netConn, listener.key, listener.cfg.ErrorLog, proto{}, listener.cfg.FlushRate, true)
+	conn.log.Info("raknet connection accepted; awaiting Minecraft login")
 	conn.disableEncryption = conn.disableEncryption || listener.cfg.DisablePacketEncryption
 	conn.acceptedProto = append(listener.cfg.AcceptedProtocols, proto{})
 	conn.compression = listener.cfg.Compression

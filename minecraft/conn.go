@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -539,10 +538,7 @@ func (conn *Conn) Flush() error {
 	conn.bufferedSendSpare = nil
 	conn.sendMu.Unlock()
 
-	if err := conn.enc.Encode(toSend); err != nil && !errors.Is(err, net.ErrClosed) {
-		// Should never happen.
-		panic(fmt.Errorf("error encoding packet batch: %w", err))
-	}
+	err := conn.enc.Encode(toSend)
 
 	// Clear out toSend so that re-using the slice after resetting its length to 0 doesn't keep references
 	// to packet payloads alive, causing an 'invisible' memory leak.
@@ -553,6 +549,14 @@ func (conn *Conn) Flush() error {
 	conn.sendMu.Lock()
 	conn.bufferedSendSpare = toSend[:0]
 	conn.sendMu.Unlock()
+	if err != nil {
+		// Encoder.Encode also performs the underlying network write. Errors such
+		// as context.Canceled and net.ErrClosed are therefore expected when the
+		// peer disconnects while a large packet (notably a resource-pack chunk)
+		// is being flushed. Let the connection handler close this connection
+		// instead of taking down the entire server with a panic.
+		return conn.wrap(err, "flush")
+	}
 	return nil
 }
 
