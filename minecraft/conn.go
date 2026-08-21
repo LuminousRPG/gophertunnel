@@ -144,6 +144,9 @@ type Conn struct {
 	// readyToLogin is a bool indicating if the connection is ready to login. This is used to ensure that the client
 	// has received the relevant network settings before the login sequence starts.
 	readyToLogin bool
+	// loginPhase records the last completed pre-login step so that a client
+	// disappearing before Listener.Accept still leaves a useful diagnostic.
+	loginPhase string
 	// loggedIn is a bool indicating if the connection was logged in. It is set to true after the entire login
 	// sequence is completed.
 	loggedIn bool
@@ -217,6 +220,7 @@ func newConn(netConn net.Conn, key *ecdsa.PrivateKey, log *slog.Logger, proto Pr
 		hdr:          &packet.Header{},
 		proto:        proto,
 		readerLimits: limits,
+		loginPhase:   "awaiting-network-settings-request",
 
 		resourcePackDelivery: defaultResourcePackDeliveryConfig(),
 	}
@@ -813,6 +817,7 @@ func (conn *Conn) handleRequestNetworkSettings(pk *packet.RequestNetworkSettings
 	conn.enc.EnableCompression(conn.compression, conn.compressionThreshold)
 	conn.encMu.Unlock()
 	conn.dec.EnableCompression(conn.compression, conn.maxDecompressedLen)
+	conn.loginPhase = "awaiting-login"
 	return nil
 }
 
@@ -868,6 +873,7 @@ func (conn *Conn) handleLogin(pk *packet.Login) error {
 	if err := conn.enableEncryption(authResult.PublicKey); err != nil {
 		return fmt.Errorf("enable encryption: %w", err)
 	}
+	conn.loginPhase = "awaiting-client-handshake"
 	return nil
 }
 
@@ -921,6 +927,7 @@ func (conn *Conn) handleClientToServerHandshake() error {
 		"total_bytes", totalBytes,
 		"required", conn.texturePacksRequired,
 	)
+	conn.loginPhase = "awaiting-resource-pack-response"
 	return nil
 }
 
@@ -1118,6 +1125,7 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 		// correctly again.
 		return conn.close(conn.closeErr("resource pack refused"))
 	case packet.PackResponseSendPacks:
+		conn.loginPhase = "resource-pack-download"
 		packs := pk.PacksToDownload
 		conn.packQueue = &resourcePackQueue{
 			packs:     conn.resourcePacks,
@@ -1132,6 +1140,7 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 			return err
 		}
 	case packet.PackResponseAllPacksDownloaded:
+		conn.loginPhase = "awaiting-resource-pack-completed"
 		pk := &packet.ResourcePackStack{BaseGameVersion: protocol.CurrentVersion, Experiments: []protocol.ExperimentData{{Name: "cameras", Enabled: true}}}
 		for _, pack := range conn.resourcePacks {
 			resourcePack := protocol.StackResourcePack{UUID: pack.UUID().String(), Version: pack.Version()}
@@ -1147,6 +1156,7 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 			return fmt.Errorf("send ResourcePackStack: %w", err)
 		}
 	case packet.PackResponseCompleted:
+		conn.loginPhase = "complete"
 		conn.loggedIn = true
 	default:
 		return fmt.Errorf("unknown ResourcePackClientResponse response type %v", pk.Response)

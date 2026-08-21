@@ -498,7 +498,7 @@ func (listener *Listener) handleConn(conn *Conn) {
 				// connected at all.
 				attrs := []any{
 					"player", conn.identityData.DisplayName,
-					"phase", "before-resource-pack-request",
+					"phase", conn.loginPhase,
 				}
 				if queue := conn.packQueue; queue != nil && queue.currentPack != nil {
 					pack := queue.currentPack
@@ -516,7 +516,7 @@ func (listener *Listener) handleConn(conn *Conn) {
 						"percent", percent,
 					)
 				}
-				conn.log.Info("connection closed before login completed (net.ErrClosed - likely local timeout/close, not a client-reported reason)", attrs...)
+				conn.log.Warn("connection closed before login completed (net.ErrClosed - likely local timeout/close, not a client-reported reason)", attrs...)
 			}
 			return
 		}
