@@ -372,10 +372,18 @@ func (listener *Listener) updatePongData() {
 	}); ok {
 		port = a.AddrPort().Port()
 	}
-	listener.listener.PongData([]byte(fmt.Sprintf("MCPE;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;",
+	listener.listener.PongData(formatPongData(s, listener.listener.ID(), port))
+}
+
+// formatPongData returns the 12 semicolon-delimited fields defined by the
+// Bedrock unconnected-pong format. Do not append fields after the IPv6 port:
+// some clients parse this status response before starting the RakNet handshake
+// and reject non-standard trailing fields.
+func formatPongData(s ServerStatus, listenerID int64, port uint16) []byte {
+	return []byte(fmt.Sprintf("MCPE;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;",
 		s.ServerName, protocol.CurrentProtocol, protocol.CurrentVersion, s.PlayerCount, s.MaxPlayers,
-		listener.listener.ID(), s.ServerSubName, "Creative", 1, port, port, 0,
-	)))
+		listenerID, s.ServerSubName, "Creative", 1, port, port,
+	))
 }
 
 // listen starts listening for incoming connections and packets. When a player is fully connected, it submits
