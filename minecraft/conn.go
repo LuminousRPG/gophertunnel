@@ -895,11 +895,24 @@ func (conn *Conn) handleClientToServerHandshake() error {
 	if err := conn.WritePacket(&packet.PlayStatus{Status: packet.PlayStatusLoginSuccess}); err != nil {
 		return fmt.Errorf("send PlayStatus (Status=LoginSuccess): %w", err)
 	}
+	// PowerNukkitX sends LoginSuccess immediately before it starts the resource
+	// pack phase. Keep it in its own encrypted batch instead of combining it
+	// with ResourcePacksInfo: some clients transition their login state only
+	// after consuming that first batch.
+	if err := conn.Flush(); err != nil {
+		return fmt.Errorf("flush PlayStatus (Status=LoginSuccess): %w", err)
+	}
 
 	if conn.fetchResourcePacks != nil {
 		conn.resourcePacks = conn.fetchResourcePacks(conn.identityData, conn.clientData, slices.Clone(conn.resourcePacks))
 	}
-	pk := &packet.ResourcePacksInfo{TexturePackRequired: conn.texturePacksRequired, ForceDisableVibrantVisuals: conn.forceDisableVibrantVisuals}
+	pk := &packet.ResourcePacksInfo{
+		TexturePackRequired:        conn.texturePacksRequired,
+		ForceDisableVibrantVisuals: conn.forceDisableVibrantVisuals,
+		// PowerNukkitX sends the nil world-template version as a valid zero
+		// semantic version rather than an empty string.
+		WorldTemplateVersion: "0.0.0",
+	}
 	for _, pack := range conn.resourcePacks {
 		texturePack := protocol.TexturePackInfo{
 			UUID:        pack.UUID(),
@@ -916,6 +929,9 @@ func (conn *Conn) handleClientToServerHandshake() error {
 	// Finally we send the packet after the play status.
 	if err := conn.WritePacket(pk); err != nil {
 		return fmt.Errorf("send ResourcePacksInfo: %w", err)
+	}
+	if err := conn.Flush(); err != nil {
+		return fmt.Errorf("flush ResourcePacksInfo: %w", err)
 	}
 	totalBytes := uint64(0)
 	for _, pack := range conn.resourcePacks {
