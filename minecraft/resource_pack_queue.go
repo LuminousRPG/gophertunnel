@@ -21,6 +21,9 @@ type resourcePackQueue struct {
 	downloadingPacks map[string]downloadingPack
 	awaitingPacks    map[string]*downloadingPack
 	chunkSize        uint32
+	// nextProgressPercent is the next confirmed-download milestone written to
+	// the server log for currentPack.
+	nextProgressPercent uint32
 }
 
 // downloadingPack is a resource pack that is being downloaded by a client connection.
@@ -64,6 +67,7 @@ func (queue *resourcePackQueue) NextPack() (pk *packet.ResourcePackDataInfo, ok 
 
 		queue.currentPack = pack
 		queue.currentOffset = 0
+		queue.nextProgressPercent = 5
 		checksum := pack.Checksum()
 
 		var packType byte

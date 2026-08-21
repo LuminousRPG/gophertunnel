@@ -907,6 +907,16 @@ func (conn *Conn) handleClientToServerHandshake() error {
 	if err := conn.WritePacket(pk); err != nil {
 		return fmt.Errorf("send ResourcePacksInfo: %w", err)
 	}
+	totalBytes := uint64(0)
+	for _, pack := range conn.resourcePacks {
+		totalBytes += uint64(pack.Len())
+	}
+	conn.log.Info("resource pack list sent; awaiting client response",
+		"player", conn.identityData.DisplayName,
+		"packs", len(conn.resourcePacks),
+		"total_bytes", totalBytes,
+		"required", conn.texturePacksRequired,
+	)
 	return nil
 }
 
@@ -1093,6 +1103,11 @@ func (conn *Conn) hasPack(uuid string, version string, hasBehaviours bool) bool 
 // handleResourcePackClientResponse handles an incoming resource pack client response packet. The packet is
 // handled differently depending on the response.
 func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClientResponse) error {
+	conn.log.Info("resource pack client response",
+		"player", conn.identityData.DisplayName,
+		"response", pk.Response,
+		"requested_packs", len(pk.PacksToDownload),
+	)
 	switch pk.Response {
 	case packet.PackResponseRefused:
 		// Even though this response is never sent, we handle it appropriately in case it is changed to work
@@ -1209,6 +1224,14 @@ func (conn *Conn) nextResourcePackDownload() error {
 	if err := conn.WritePacket(pk); err != nil {
 		return fmt.Errorf("send ResourcePackDataInfo: %w", err)
 	}
+	conn.log.Info("resource pack download started",
+		"player", conn.identityData.DisplayName,
+		"pack_uuid", conn.packQueue.currentPack.UUID(),
+		"pack_version", conn.packQueue.currentPack.Version(),
+		"pack_bytes", conn.packQueue.currentPack.Len(),
+		"chunk_bytes", conn.packQueue.chunkSize,
+		"chunks", conn.packQueue.currentPack.DataChunkCount(int(conn.packQueue.chunkSize)),
+	)
 	// Set the next expected packet to ResourcePackChunkRequest packets.
 	conn.expect(packet.IDResourcePackChunkRequest)
 	return nil
@@ -1325,6 +1348,7 @@ func (conn *Conn) handleResourcePackChunkRequest(pk *packet.ResourcePackChunkReq
 	if conn.packQueue.currentOffset != uint64(pk.ChunkIndex)*chunkSize {
 		return fmt.Errorf("expected chunk index %v, but got %v", conn.packQueue.currentOffset/chunkSize, pk.ChunkIndex)
 	}
+	conn.logConfirmedResourcePackProgress(current)
 	response := &packet.ResourcePackChunkData{
 		UUID:       pk.UUID,
 		ChunkIndex: uint32(pk.ChunkIndex),
@@ -1361,6 +1385,30 @@ func (conn *Conn) handleResourcePackChunkRequest(pk *packet.ResourcePackChunkReq
 	}
 
 	return nil
+}
+
+// logConfirmedResourcePackProgress records progress inferred from the next
+// sequential chunk request. A client only asks for chunk N after it has
+// received and processed the preceding chunks, so currentOffset is a more
+// useful failure boundary than the number of bytes merely handed to UDP.
+func (conn *Conn) logConfirmedResourcePackProgress(pack *resource.Pack) {
+	if pack == nil || pack.Len() == 0 {
+		return
+	}
+	confirmed := min(conn.packQueue.currentOffset, uint64(pack.Len()))
+	percent := uint32(confirmed * 100 / uint64(pack.Len()))
+	if percent < conn.packQueue.nextProgressPercent {
+		return
+	}
+	conn.log.Info("resource pack download progress",
+		"player", conn.identityData.DisplayName,
+		"pack_uuid", pack.UUID(),
+		"pack_version", pack.Version(),
+		"confirmed_bytes", confirmed,
+		"pack_bytes", pack.Len(),
+		"percent", percent,
+	)
+	conn.packQueue.nextProgressPercent = min((percent/5+1)*5, 100)
 }
 
 // waitResourcePackChunkSendDelay waits before processing the next resource pack chunk request.

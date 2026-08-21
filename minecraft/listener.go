@@ -474,7 +474,10 @@ func (listener *Listener) handleConn(conn *Conn) {
 		packets, err := conn.dec.Decode()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
-				conn.log.Error(err.Error())
+				conn.log.Error(err.Error(),
+					"player", conn.identityData.DisplayName,
+					"logged_in", conn.loggedIn,
+				)
 			} else if !conn.loggedIn {
 				// A silent net.ErrClosed here (as opposed to a decode/handling
 				// error, which is logged above) means our own side already
@@ -484,7 +487,27 @@ func (listener *Listener) handleConn(conn *Conn) {
 				// noise on every ordinary player disconnect) so it's visible
 				// instead of indistinguishable from a client that never
 				// connected at all.
-				conn.log.Info("connection closed before login completed (net.ErrClosed - likely local timeout/close, not a client-reported reason)")
+				attrs := []any{
+					"player", conn.identityData.DisplayName,
+					"phase", "before-resource-pack-request",
+				}
+				if queue := conn.packQueue; queue != nil && queue.currentPack != nil {
+					pack := queue.currentPack
+					confirmed := min(queue.currentOffset, uint64(pack.Len()))
+					percent := uint32(0)
+					if pack.Len() > 0 {
+						percent = uint32(confirmed * 100 / uint64(pack.Len()))
+					}
+					attrs = append(attrs,
+						"phase", "resource-pack-download",
+						"pack_uuid", pack.UUID(),
+						"pack_version", pack.Version(),
+						"confirmed_bytes", confirmed,
+						"pack_bytes", pack.Len(),
+						"percent", percent,
+					)
+				}
+				conn.log.Info("connection closed before login completed (net.ErrClosed - likely local timeout/close, not a client-reported reason)", attrs...)
 			}
 			return
 		}
