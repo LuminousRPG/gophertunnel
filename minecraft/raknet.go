@@ -2,14 +2,27 @@ package minecraft
 
 import (
 	"context"
-	"github.com/sandertv/go-raknet"
 	"log/slog"
 	"net"
+
+	"github.com/sandertv/go-raknet"
 )
 
 // RakNet is an implementation of a RakNet v10 Network.
 type RakNet struct {
 	l *slog.Logger
+
+	// MaxSendBytesPerSecond limits each accepted connection's outbound
+	// datagram rate. Zero disables send pacing.
+	MaxSendBytesPerSecond int
+	// SendBurstBytes is the number of bytes that may be sent at once after an
+	// idle period. Zero uses go-raknet's default.
+	SendBurstBytes int
+}
+
+// NewRakNet returns a RakNet network that reports transport errors to log.
+func NewRakNet(log *slog.Logger) RakNet {
+	return RakNet{l: log}
 }
 
 // DialContext ...
@@ -32,11 +45,13 @@ func (r RakNet) Listen(address string) (NetworkListener, error) {
 		// errors, which RakNet's MTU discovery can't detect). This trades a
 		// little more fragmentation for connections that would otherwise
 		// have data go missing above their real path MTU.
-		MaxMTU: 1200,
+		MaxMTU:                1200,
+		MaxSendBytesPerSecond: r.MaxSendBytesPerSecond,
+		SendBurstBytes:        r.SendBurstBytes,
 	}.Listen(address)
 }
 
 // init registers the RakNet network.
 func init() {
-	RegisterNetwork("raknet", func(l *slog.Logger) Network { return RakNet{l: l} })
+	RegisterNetwork("raknet", func(l *slog.Logger) Network { return NewRakNet(l) })
 }
