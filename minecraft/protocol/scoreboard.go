@@ -55,11 +55,7 @@ func (x *ScoreboardEntry) Marshal(r IO) {
 		if x.ObjectiveName != "" {
 			objective = Option(x.ObjectiveName)
 		}
-		// Bedrock 1.26.44 changed the optional objective name on remove entries to a
-		// nested optional without bumping the protocol version. A single optional
-		// shifts the remainder of a non-empty remove entry and is rejected as a bad
-		// packet by 1.26.44 clients.
-		DoubleOptionalFunc(r, &objective, r.String)
+		OptionalFunc(r, &objective, r.String)
 		x.ObjectiveName, _ = objective.Value()
 	case ScoreboardIdentityEntity, ScoreboardIdentityPlayer:
 		r.String(&x.ObjectiveName)
