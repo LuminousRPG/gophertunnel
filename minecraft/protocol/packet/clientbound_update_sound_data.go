@@ -24,11 +24,33 @@ func (*ClientboundUpdateSoundData) ID() uint32 {
 
 func (pk *ClientboundUpdateSoundData) Marshal(io protocol.IO) {
 	io.Uint64(&pk.ServerSoundHandle)
-	protocol.OptionalMarshaler(io, &pk.Stop)
-	protocol.OptionalMarshaler(io, &pk.SetVolume)
-	protocol.OptionalMarshaler(io, &pk.SetPitch)
-	protocol.OptionalMarshaler(io, &pk.Fade)
-	protocol.OptionalMarshaler(io, &pk.SeekTo)
-	protocol.OptionalMarshaler(io, &pk.Pause)
-	protocol.OptionalMarshaler(io, &pk.Resume)
+	marshalSoundDataUpdate(io, &pk.Stop, protocol.SoundDataUpdateStop)
+	marshalSoundDataUpdate(io, &pk.SetVolume, protocol.SoundDataUpdateSetVolume)
+	marshalSoundDataUpdate(io, &pk.SetPitch, protocol.SoundDataUpdateSetPitch)
+	marshalSoundDataUpdate(io, &pk.Fade, protocol.SoundDataUpdateFade)
+	marshalSoundDataUpdate(io, &pk.SeekTo, protocol.SoundDataUpdateSeekTo)
+	marshalSoundDataUpdate(io, &pk.Pause, protocol.SoundDataUpdatePause)
+	marshalSoundDataUpdate(io, &pk.Resume, protocol.SoundDataUpdateResume)
+}
+
+// marshalSoundDataUpdate writes a Cereal union slot. These fields have a
+// default Stop variant, not an optional-presence marker: Writing a bool before
+// each union shifts the remainder of the packet and makes Bedrock reject it.
+func marshalSoundDataUpdate(io protocol.IO, optional *protocol.Optional[protocol.SoundDataUpdate], expectedType uint32) {
+	if _, reading := io.(*protocol.Reader); reading {
+		var update protocol.SoundDataUpdate
+		update.Marshal(io)
+		if update.Type == expectedType {
+			*optional = protocol.Option(update)
+		} else {
+			*optional = protocol.Optional[protocol.SoundDataUpdate]{}
+		}
+		return
+	}
+
+	update, ok := optional.Value()
+	if !ok {
+		update.Type = protocol.SoundDataUpdateStop
+	}
+	update.Marshal(io)
 }
