@@ -41,7 +41,7 @@ func (x *ScoreboardEntry) Marshal(r IO) {
 	r.Varuint32(&variant)
 	x.IdentityType = byte(variant)
 
-	typeNames := [...]string{"remove", "changeplayer", "changeentity", "changefakeplayer"}
+	typeNames := [...]string{"Remove", "ChangePlayer", "ChangeEntity", "ChangeFakePlayer"}
 	if variant >= uint32(len(typeNames)) {
 		r.UnknownEnumOption(variant, "scoreboard entry variant")
 		return

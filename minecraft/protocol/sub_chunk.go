@@ -46,13 +46,26 @@ func (x *SubChunkEntry) Marshal(r IO) {
 	OptionalFunc(r, &x.RawPayload, r.ByteSlice)
 	r.Uint8(&x.HeightMapType)
 	OptionalFunc(r, &x.HeightMapData, func(data *[]int8) {
-		FuncSliceOfLen(r, 272, data, r.Int8)
+		subChunkHeightMap(r, data)
 	})
 	r.Uint8(&x.RenderHeightMapType)
 	OptionalFunc(r, &x.RenderHeightMapData, func(data *[]int8) {
-		FuncSliceOfLen(r, 272, data, r.Int8)
+		subChunkHeightMap(r, data)
 	})
 	OptionalFunc(r, &x.BlobHash, r.Uint64)
+}
+
+const (
+	// SubChunkHeightMapLen is the wire length of a sub-chunk height map: 16 rows of a one-byte row length (always
+	// 16) followed by 16 int8 heights, i.e. 16*(1+16) = 272 bytes. The caller supplies the row-length markers
+	// inside the slice, so the whole thing is written flat.
+	SubChunkHeightMapLen = 16 * (1 + 16)
+)
+
+// subChunkHeightMap reads/writes the height map of a sub-chunk entry. It is a flat SubChunkHeightMapLen-byte
+// block: the per-row length markers live in the data itself rather than being framed here.
+func subChunkHeightMap(r IO, data *[]int8) {
+	FuncSliceOfLen(r, SubChunkHeightMapLen, data, r.Int8)
 }
 
 // SubChunkOffset represents an offset from the base position of another sub chunk.

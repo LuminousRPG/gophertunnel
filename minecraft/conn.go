@@ -9,8 +9,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -400,6 +402,13 @@ func (conn *Conn) WritePacket(pk packet.Packet) error {
 	}()
 
 	for _, converted := range conn.proto.ConvertFromLatest(pk, conn) {
+		// Diagnostic packet suppression establishes the BadPacket boundary with
+		// a real client. Never enable this for normal operation.
+		packetName := strings.TrimPrefix(fmt.Sprintf("%T", converted), "*packet.")
+		if slices.Contains(strings.Split(os.Getenv("DF_DROP_PACKETS"), ","), packetName) {
+			log.Printf("conn suppressed remote=%s type=%s", conn.RemoteAddr(), packetName)
+			continue
+		}
 		buf.Reset()
 		conn.hdr.PacketID = converted.ID()
 		_ = conn.hdr.Write(buf)
@@ -407,6 +416,17 @@ func (conn *Conn) WritePacket(pk packet.Packet) error {
 
 		converted.Marshal(conn.proto.NewWriter(buf, conn.shieldID.Load()))
 
+		if os.Getenv("DF_TRACE_PACKETS") == "1" {
+			log.Printf("conn trace remote=%s id=%d type=%T len=%d", conn.RemoteAddr(), converted.ID(), converted, buf.Len()-l)
+			switch converted.(type) {
+			case *packet.SubChunk, *packet.LevelChunk:
+				pl := buf.Bytes()[l:]
+				if len(pl) > 5000 {
+					pl = pl[:5000]
+				}
+				log.Printf("conn hex %T len=%d %x", converted, buf.Len()-l, pl)
+			}
+		}
 		if conn.packetFunc != nil {
 			conn.packetFunc(*conn.hdr, buf.Bytes()[l:], conn.LocalAddr(), conn.RemoteAddr())
 		}
