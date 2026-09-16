@@ -112,7 +112,8 @@ type TextShape struct {
 	UseRotation bool
 	// BackgroundColour is the RGBA colour to use for the text background. This is a translucent black colour by default.
 	BackgroundColour Optional[color.RGBA]
-	// LineGapHeight is the gap between lines used when rendering multiline text.
+	// LineGapHeight is the gap to leave between each line of multiline text. If not set, the client uses its
+	// default gap.
 	LineGapHeight float32
 	// DepthTest is whether the text should show through walls. Use true for default behaviour.
 	DepthTest bool
