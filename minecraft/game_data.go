@@ -74,6 +74,9 @@ type GameData struct {
 	// cannot invite their friends to the Xbox Live multiplayer session they're currently in.
 	// It only applies to worlds and has no effect on external servers.
 	XBLBroadcastMode int32
+	// PlatformBroadcastMode is the mode used to broadcast the joined game across the
+	// platform's own network. It takes the same values as XBLBroadcastMode.
+	PlatformBroadcastMode int32
 	// GameRules defines game rules currently active with their respective values. The value of these game
 	// rules may be either 'bool', 'int32' or 'float32'. Some game rules are server side only, and don't
 	// necessarily need to be sent to the client.
