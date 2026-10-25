@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/df-mc/jsonc"
 	"github.com/google/uuid"
@@ -26,9 +27,11 @@ type Pack struct {
 	// downloadURL is the URL that the resource pack can be downloaded from. If the string is empty, then the
 	// resource pack will be downloaded over RakNet rather than HTTP.
 	downloadURL string
-	// content is a bytes.Reader that contains the full content of the zip file. It is used to send the full
-	// data to a client.
-	content *bytes.Reader
+	// content holds the full content of the zip file. It is used to send the full data to a client. A pack
+	// compiled from a directory reads it from its private archive file rather than keeping it in memory.
+	content io.ReaderAt
+	// size is the length in bytes of content.
+	size int64
 	// contentKey is the key used to encrypt the files. The client uses this to decrypt the resource pack if encrypted.
 	// If nothing is encrypted, this field can be left as an empty string.
 	contentKey string
@@ -95,7 +98,7 @@ func MustReadURL(url string) *Pack {
 
 // Read parses an archived resource pack written to a raw byte slice passed. The data must be a valid
 // zip archive and contain a pack manifest in order for the function to succeed.
-// Read saves the data to a temporary archive.
+// Read saves the data to a temporary archive, which the pack then reads from.
 func Read(r io.Reader) (*Pack, error) {
 	temp, err := createTempFile()
 	if err != nil {
@@ -103,13 +106,15 @@ func Read(r io.Reader) (*Pack, error) {
 	}
 	_, _ = io.Copy(temp, r)
 	if err := temp.Close(); err != nil {
+		_ = os.Remove(temp.Name())
 		return nil, fmt.Errorf("close temp zip archive: %w", err)
 	}
-	pack, parseErr := ReadPath(temp.Name())
-	if err := os.Remove(temp.Name()); err != nil {
-		return nil, fmt.Errorf("remove temp zip archive: %w", err)
+	manifest, err := readManifest(temp.Name())
+	if err != nil {
+		_ = os.Remove(temp.Name())
+		return nil, fmt.Errorf("read manifest: %w", err)
 	}
-	return pack, parseErr
+	return openArchive(temp.Name(), manifest)
 }
 
 // Name returns the name of the resource pack.
@@ -201,7 +206,7 @@ func (pack *Pack) Checksum() [32]byte {
 
 // Len returns the total length in bytes of the content of the archive that contained the resource pack.
 func (pack *Pack) Len() int {
-	return pack.content.Len()
+	return int(pack.size)
 }
 
 // DataChunkCount returns the amount of chunks the data of the resource pack is split into if each chunk has
@@ -234,7 +239,7 @@ func (pack *Pack) ReadAt(b []byte, off int64) (n int, err error) {
 // ReadFile reads a specific file from the Pack's content and returns its content as a byte slice.
 func (p *Pack) ReadFile(filePath string) ([]byte, error) {
 	// Create a new zip reader from the content of the bytes.Reader
-	zipReader, err := zip.NewReader(p.content, int64(p.content.Size()))
+	zipReader, err := zip.NewReader(p.content, p.size)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create zip reader: %w", err)
 	}
@@ -305,13 +310,14 @@ func compile(path string) (*Pack, error) {
 		}
 		// We set the path to the temp zip archive we just made.
 		path = temp.Name()
-
-		// Make sure we close the temp file and remove it at the end. We don't need to keep it, as we read all
-		// the content in a byte slice.
 		_ = temp.Close()
-		defer func() {
-			_ = os.Remove(temp.Name())
-		}()
+
+		manifest, err := readManifest(path)
+		if err != nil {
+			_ = os.Remove(path)
+			return nil, fmt.Errorf("read manifest: %w", err)
+		}
+		return openArchive(path, manifest)
 	}
 	// First we read the manifest to ensure that it exists and is valid.
 	manifest, err := readManifest(path)
@@ -328,7 +334,29 @@ func compile(path string) (*Pack, error) {
 	checksum := sha256.Sum256(content)
 	contentReader := bytes.NewReader(content)
 
-	return &Pack{manifest: manifest, checksum: checksum, content: contentReader}, nil
+	return &Pack{manifest: manifest, checksum: checksum, content: contentReader, size: contentReader.Size()}, nil
+}
+
+// openArchive makes a pack read from the temporary archive at path, which nothing else writes: a compiled
+// directory is hundreds of megabytes that would otherwise stay in memory for the whole run. The archive is
+// removed when it is closed or the process ends (openTempArchive), or else by createTempFile on a later run.
+func openArchive(path string, manifest *Manifest) (*Pack, error) {
+	f, err := openTempArchive(path)
+	if err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("open resource pack archive: %w", err)
+	}
+	h := sha256.New()
+	size, err := io.Copy(h, f)
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("read resource pack file content: %w", err)
+	}
+	_ = os.Remove(path)
+	var checksum [32]byte
+	h.Sum(checksum[:0])
+	return &Pack{manifest: manifest, checksum: checksum, content: f, size: size}, nil
 }
 
 // createTempArchive creates a zip archive from the files in the path passed and writes it to a temporary
@@ -395,12 +423,24 @@ func createTempFile() (*os.File, error) {
 	// this case.
 	dir, _ := os.UserConfigDir()
 	_ = os.MkdirAll(dir, os.ModePerm)
+	removeStaleTempFiles(dir)
 
 	temp, err := os.CreateTemp(dir, "temp_resource_pack-*.mcpack")
 	if err != nil {
 		return nil, fmt.Errorf("create temp resource pack file: %w", err)
 	}
 	return temp, nil
+}
+
+// removeStaleTempFiles removes archives that earlier runs left in dir (see openArchive). An archive still
+// open in a running process cannot be removed on Windows; the age keeps clear of one being written.
+func removeStaleTempFiles(dir string) {
+	names, _ := filepath.Glob(filepath.Join(dir, "temp_resource_pack-*.mcpack"))
+	for _, name := range names {
+		if info, err := os.Stat(name); err == nil && time.Since(info.ModTime()) > 10*time.Minute {
+			_ = os.Remove(name)
+		}
+	}
 }
 
 // packReader wraps around a zip.Reader to provide file finding functionality.
