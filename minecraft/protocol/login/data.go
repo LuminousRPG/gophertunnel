@@ -370,6 +370,9 @@ func (data ClientData) Validate() error {
 			(u.Scheme != "https" && u.Scheme != "http") {
 			return fmt.Errorf("ServerAddress is invalid: %v", data.ServerAddress)
 		}
+	} else if _, err := strconv.ParseUint(data.ServerAddress, 10, 64); err == nil {
+		// NetherNet connections signaled without HTTP, such as over LAN
+		// discovery, are addressed by the numerical network ID of the server.
 	} else if _, err := net.ResolveUDPAddr("udp", data.ServerAddress); err != nil {
 		return fmt.Errorf("ServerAddress must be resolveable as a UDP address, but got %v", data.ServerAddress)
 	}
