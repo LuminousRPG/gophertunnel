@@ -149,6 +149,8 @@ type Conn struct {
 	// loginPhase records the last completed pre-login step so that a client
 	// disappearing before Listener.Accept still leaves a useful diagnostic.
 	loginPhase string
+	// authenticated is set once the Login was verified and, with encryption, the encrypted handshake completed.
+	authenticated atomic.Bool
 	// loggedIn is a bool indicating if the connection was logged in. It is set to true after the entire login
 	// sequence is completed.
 	loggedIn bool
@@ -540,6 +542,9 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 // Flush flushes the packets currently buffered by the connections to the underlying net.Conn, so that they
 // are directly sent.
 func (conn *Conn) Flush() error {
+	if conn.ctx == nil {
+		return net.ErrClosed
+	}
 	select {
 	case <-conn.ctx.Done():
 		return conn.closeErr("flush")
@@ -609,8 +614,7 @@ func (conn *Conn) SetDeadline(t time.Time) error {
 // SetReadDeadline sets the read deadline of the Conn to the time passed. The time must be after time.Now().
 // Passing an empty time.Time to the method (time.Time{}) results in the read deadline being cleared.
 func (conn *Conn) SetReadDeadline(t time.Time) error {
-	empty := time.Time{}
-	if t == empty {
+	if t.IsZero() {
 		conn.readDeadline = make(chan time.Time)
 	} else if t.Before(time.Now()) {
 		panic(fmt.Errorf("error setting read deadline: time passed is before time.Now()"))
@@ -676,6 +680,7 @@ func (conn *Conn) takeDeferredPacket() (*packetData, bool) {
 
 // deferPacket defers a packet so that it is obtained in the next ReadPacket call
 func (conn *Conn) deferPacket(pk *packetData) {
+	pk = pk.ensureOwned()
 	conn.deferredPacketMu.Lock()
 	conn.deferredPackets = append(conn.deferredPackets, pk)
 	conn.deferredPacketMu.Unlock()
@@ -708,7 +713,7 @@ func (conn *Conn) receive(data []byte) error {
 		}
 		select {
 		case <-conn.ctx.Done():
-		case conn.packets <- pkData:
+		case conn.packets <- pkData.ensureOwned():
 		}
 		return nil
 	}
@@ -872,7 +877,12 @@ func (conn *Conn) handleLogin(pk *packet.Login) error {
 		_ = conn.WritePacket(&packet.Disconnect{Message: text.Colourf("<red>You must be logged in with XBOX Live to join.</red>")})
 		return fmt.Errorf("client was not authenticated to XBOX Live")
 	}
-	if pkc, ok := conn.conn.(publicKeyConn); ok {
+	if v, ok := conn.conn.(publicKeyVerifierConn); ok {
+		if err := v.VerifyPublicKey(authResult.PublicKey); err != nil {
+			_ = conn.WritePacket(&packet.Disconnect{Reason: packet.DisconnectReasonNotAuthenticated})
+			return fmt.Errorf("verify identity public key: %w", err)
+		}
+	} else if pkc, ok := conn.conn.(publicKeyConn); ok {
 		if pub := pkc.PublicKey(); pub != nil && !authResult.PublicKey.Equal(pub) {
 			_ = conn.WritePacket(&packet.Disconnect{Reason: packet.DisconnectReasonNotAuthenticated})
 			return fmt.Errorf("identity public key mismatch: %s != %s", login.MarshalPublicKey(authResult.PublicKey), login.MarshalPublicKey(pub))
@@ -908,8 +918,19 @@ type publicKeyConn interface {
 	PublicKey() *ecdsa.PublicKey
 }
 
+// publicKeyVerifierConn is implemented by underlying [net.Conn] of the Conn that bind the
+// connection to an identity without exposing its public key. It takes precedence over
+// publicKeyConn.
+type publicKeyVerifierConn interface {
+	// VerifyPublicKey returns an error if the validated [login.AuthResult.PublicKey]
+	// does not match the identity the connection was established for.
+	VerifyPublicKey(pub *ecdsa.PublicKey) error
+}
+
 // handleClientToServerHandshake handles an incoming ClientToServerHandshake packet.
 func (conn *Conn) handleClientToServerHandshake() error {
+	// Mark authentication before the work that follows it, which may outlast the listener's login deadline.
+	conn.authenticated.Store(true)
 	// The next expected packet is a resource pack client response.
 	conn.expect(packet.IDResourcePackClientResponse, packet.IDClientCacheStatus)
 	if err := conn.WritePacket(&packet.PlayStatus{Status: packet.PlayStatusLoginSuccess}); err != nil {
@@ -980,8 +1001,7 @@ func (conn *Conn) handleServerToClientHandshake(pk *packet.ServerToClientHandsha
 	if err != nil {
 		return fmt.Errorf("parse server token: %w", err)
 	}
-	//lint:ignore S1005 Double assignment is done explicitly to prevent panics.
-	raw, _ := tok.Headers[0].ExtraHeaders["x5u"]
+	raw := tok.Headers[0].ExtraHeaders["x5u"]
 	kStr, _ := raw.(string)
 
 	pub := new(ecdsa.PublicKey)
@@ -1082,14 +1102,14 @@ func (conn *Conn) handleResourcePacksInfo(pk *packet.ResourcePacksInfo) error {
 	}
 
 	if len(packsToDownload) != 0 {
-		conn.expect(packet.IDResourcePackDataInfo, packet.IDResourcePackChunkData)
+		conn.expect(packet.IDResourcePackDataInfo, packet.IDResourcePackChunkData, packet.IDPlayStatus)
 		_ = conn.WritePacket(&packet.ResourcePackClientResponse{
 			Response:        packet.PackResponseSendPacks,
 			PacksToDownload: packsToDownload,
 		})
 		return nil
 	}
-	conn.expect(packet.IDResourcePackStack)
+	conn.expect(packet.IDResourcePackStack, packet.IDPlayStatus)
 
 	_ = conn.WritePacket(&packet.ResourcePackClientResponse{Response: packet.PackResponseAllPacksDownloaded})
 	return nil
@@ -1163,6 +1183,9 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 	case packet.PackResponseSendPacks:
 		conn.loginPhase = "resource-pack-download"
 		packs := pk.PacksToDownload
+		if len(packs) == 0 {
+			break
+		}
 		conn.packQueue = &resourcePackQueue{
 			packs:     conn.resourcePacks,
 			chunkSize: conn.resourcePackDelivery.ChunkSize,
@@ -1202,6 +1225,8 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 
 // startGame sends a StartGame packet using the game data of the connection.
 func (conn *Conn) startGame() {
+	// The client may answer before the packets below are all written, so expect its replies first.
+	conn.expect(packet.IDRequestChunkRadius, packet.IDSetLocalPlayerAsInitialised)
 	data := conn.gameData
 	if len(data.Dimensions) > 0 {
 		_ = conn.WritePacket(&packet.DimensionData{Definitions: data.Dimensions})
@@ -1262,7 +1287,6 @@ func (conn *Conn) startGame() {
 	})
 	_ = conn.WritePacket(&packet.ItemRegistry{Items: data.Items})
 	_ = conn.Flush()
-	conn.expect(packet.IDRequestChunkRadius, packet.IDSetLocalPlayerAsInitialised)
 }
 
 // nextResourcePackDownload moves to the next resource pack to download and sends a resource pack data info
@@ -1355,7 +1379,7 @@ func (conn *Conn) handleResourcePackDataInfo(pk *packet.ResourcePackDataInfo) er
 		conn.packMu.Unlock()
 
 		if packAmount == 0 {
-			conn.expect(packet.IDResourcePackStack)
+			conn.expect(packet.IDResourcePackStack, packet.IDPlayStatus)
 			_ = conn.WritePacket(&packet.ResourcePackClientResponse{Response: packet.PackResponseAllPacksDownloaded})
 		}
 		conn.storeResourcePack(pack.cacheKey, newPack)
@@ -1568,7 +1592,9 @@ func (conn *Conn) handleChunkRadiusUpdated(pk *packet.ChunkRadiusUpdated) error 
 	if pk.ChunkRadius < 1 {
 		return fmt.Errorf("expected chunk radius of at least 1, got %v", pk.ChunkRadius)
 	}
-	conn.expect(packet.IDPlayStatus)
+	// Some servers send ResourcePacksInfo before PlayStatus(LoginSuccess); the vanilla client accepts either
+	// order, so both are expected from here on.
+	conn.expect(packet.IDPlayStatus, packet.IDResourcePacksInfo)
 
 	conn.gameData.ChunkRadius = pk.ChunkRadius
 	conn.gameDataReceived.Store(true)
@@ -1598,8 +1624,7 @@ func (conn *Conn) handlePlayStatus(pk *packet.PlayStatus) error {
 		if err := conn.WritePacket(&packet.ClientCacheStatus{Enabled: conn.cacheEnabled}); err != nil {
 			return fmt.Errorf("send ClientCacheStatus: %w", err)
 		}
-		// The next packet we expect is the ResourcePacksInfo packet.
-		conn.expect(packet.IDResourcePacksInfo)
+		// ResourcePacksInfo is already expected, and may even have been handled if the server sent it first.
 		return conn.Flush()
 	case packet.PlayStatusLoginFailedClient:
 		_ = conn.close(conn.closeErr("client outdated"))
@@ -1700,17 +1725,32 @@ func (conn *Conn) encryptionKey(salt []byte, pub *ecdsa.PublicKey) ([32]byte, er
 	return sha256.Sum256(append(salt, sharedSecret...)), nil
 }
 
-// expect sets the packet IDs that are next expected to arrive.
+// expect sets the packet IDs that are next expected to arrive. A packet that was deferred before its ID was
+// expected is not handled later: expect everything a peer may send at a stage before writing the packet it
+// answers to.
 func (conn *Conn) expect(packetIDs ...uint32) {
 	conn.expectedIDs.Store(packetIDs)
+}
+
+// closeTransport closes conn without waiting for pending packets to be written. The context is cancelled
+// before the transport is closed, so a flush blocked on a peer that stopped reading returns without
+// treating the closed transport as an encoding failure.
+func (conn *Conn) closeTransport(cause error) {
+	conn.cancelFunc(cause)
+	_ = conn.conn.Close()
+	_ = conn.close(cause)
 }
 
 func (conn *Conn) close(cause error) error {
 	var err error
 	conn.once.Do(func() {
 		err = conn.Flush()
-		conn.cancelFunc(cause)
-		_ = conn.conn.Close()
+		if conn.cancelFunc != nil {
+			conn.cancelFunc(cause)
+		}
+		if conn.conn != nil {
+			_ = conn.conn.Close()
+		}
 	})
 	return err
 }

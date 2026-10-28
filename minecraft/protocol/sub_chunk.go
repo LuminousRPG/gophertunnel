@@ -30,11 +30,11 @@ type SubChunkEntry struct {
 	// HeightMapType is always one of the constants defined in the HeightMapData constants.
 	HeightMapType byte
 	// HeightMapData is the data for the height map, if present.
-	HeightMapData Optional[[]int8]
+	HeightMapData Optional[HeightMap]
 	// RenderHeightMapType is always one of the constants defined in the HeightMapData constants.
 	RenderHeightMapType byte
 	// RenderHeightMapData is the data for the render height map, if present.
-	RenderHeightMapData Optional[[]int8]
+	RenderHeightMapData Optional[HeightMap]
 	// BlobHash is the hash of the blob, if present.
 	BlobHash Optional[uint64]
 }
@@ -45,27 +45,12 @@ func (x *SubChunkEntry) Marshal(r IO) {
 	r.Uint8(&x.Result)
 	OptionalFunc(r, &x.RawPayload, r.ByteSlice)
 	r.Uint8(&x.HeightMapType)
-	OptionalFunc(r, &x.HeightMapData, func(data *[]int8) {
-		subChunkHeightMap(r, data)
-	})
+
+	OptionalMarshaler(r, &x.HeightMapData)
 	r.Uint8(&x.RenderHeightMapType)
-	OptionalFunc(r, &x.RenderHeightMapData, func(data *[]int8) {
-		subChunkHeightMap(r, data)
-	})
+
+	OptionalMarshaler(r, &x.RenderHeightMapData)
 	OptionalFunc(r, &x.BlobHash, r.Uint64)
-}
-
-const (
-	// SubChunkHeightMapLen is the wire length of a sub-chunk height map: 16 rows of a one-byte row length (always
-	// 16) followed by 16 int8 heights, i.e. 16*(1+16) = 272 bytes. The caller supplies the row-length markers
-	// inside the slice, so the whole thing is written flat.
-	SubChunkHeightMapLen = 16 * (1 + 16)
-)
-
-// subChunkHeightMap reads/writes the height map of a sub-chunk entry. It is a flat SubChunkHeightMapLen-byte
-// block: the per-row length markers live in the data itself rather than being framed here.
-func subChunkHeightMap(r IO, data *[]int8) {
-	FuncSliceOfLen(r, SubChunkHeightMapLen, data, r.Int8)
 }
 
 // SubChunkOffset represents an offset from the base position of another sub chunk.
@@ -76,4 +61,22 @@ func (x *SubChunkOffset) Marshal(r IO) {
 	r.Int8(&x[0])
 	r.Int8(&x[1])
 	r.Int8(&x[2])
+}
+
+// HeightMap holds the height of every column of a sub-chunk, indexed as [z][x].
+type HeightMap [16][16]int8
+
+// Marshal encodes/decodes a HeightMap.
+func (x *HeightMap) Marshal(r IO) {
+	for z := range x {
+		n := uint32(16)
+		r.Varuint32(&n)
+		if n != 16 {
+			r.InvalidValue(n, "height map row", "must hold 16 heights")
+			return
+		}
+		for i := range x[z] {
+			r.Int8(&x[z][i])
+		}
+	}
 }

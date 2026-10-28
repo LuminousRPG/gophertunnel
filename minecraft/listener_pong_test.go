@@ -16,7 +16,7 @@ func TestFormatPongDataUsesStandardFieldCount(t *testing.T) {
 		MaxPlayers:    50,
 	}
 	got := string(formatPongData(status, 1234, 19132))
-	want := fmt.Sprintf("MCPE;Luminous RPG;%d;%s;8;50;1234;PlayServer;Creative;1;19132;19132;",
+	want := fmt.Sprintf("MCPE;Luminous RPG;%d;%s;8;50;1234;PlayServer;Survival;1;19132;19132;",
 		protocol.CurrentProtocol, protocol.CurrentVersion)
 	if got != want {
 		t.Fatalf("formatPongData() = %q, want %q", got, want)
