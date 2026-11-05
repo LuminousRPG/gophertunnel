@@ -361,20 +361,22 @@ func (data ClientData) Validate() error {
 	if strings.Contains(data.ServerAddress, "://") {
 		// The server address for NetherNet connections has the following format:
 		// https://<host>:<port>:<port>
+		// A player who typed the scheme into the address field sends https://<host>:<port>
+		// instead. The address only describes how the player reached us, so either is accepted.
 		ind := strings.LastIndex(data.ServerAddress, ":")
 		u, err := url.Parse(data.ServerAddress[:ind])
 		if err != nil {
 			return fmt.Errorf("ServerAddress must be a URL, but got %v", data.ServerAddress)
 		}
-		if u.Host == "" || u.Port() == "" || u.Port() != data.ServerAddress[ind+1:] ||
-			(u.Scheme != "https" && u.Scheme != "http") {
+		if u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 			return fmt.Errorf("ServerAddress is invalid: %v", data.ServerAddress)
 		}
 	} else if _, err := strconv.ParseUint(data.ServerAddress, 10, 64); err == nil {
 		// NetherNet connections signaled without HTTP, such as over LAN
 		// discovery, are addressed by the numerical network ID of the server.
-	} else if _, err := net.ResolveUDPAddr("udp", data.ServerAddress); err != nil {
-		return fmt.Errorf("ServerAddress must be resolveable as a UDP address, but got %v", data.ServerAddress)
+	} else if _, port, err := net.SplitHostPort(data.ServerAddress); err != nil || port == "" {
+		// Not resolved: a DNS lookup failing for a moment must not refuse the login.
+		return fmt.Errorf("ServerAddress must be a host and port, but got %v", data.ServerAddress)
 	}
 	if err := base64DecLength(data.SkinData, data.SkinImageHeight*data.SkinImageWidth*4); err != nil {
 		return fmt.Errorf("SkinData is invalid: %w", err)

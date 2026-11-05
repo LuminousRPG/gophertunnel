@@ -20,7 +20,23 @@ func (pk *ClientCacheBlobStatus) ID() uint32 {
 	return IDClientCacheBlobStatus
 }
 
+// maxBlobStatusHashes bounds each hash list. The client answers every sub chunk blob it was sent at
+// once, so a large view loading after a join or teleport passes the usual slice limit of 1024.
+const maxBlobStatusHashes = 1 << 16
+
 func (pk *ClientCacheBlobStatus) Marshal(io protocol.IO) {
-	protocol.FuncSlice(io, &pk.MissHashes, io.Uint64)
-	protocol.FuncSlice(io, &pk.HitHashes, io.Uint64)
+	blobHashes(io, &pk.MissHashes)
+	blobHashes(io, &pk.HitHashes)
+}
+
+func blobHashes(io protocol.IO, x *[]uint64) {
+	count := uint32(len(*x))
+	io.Varuint32(&count)
+	if r, ok := io.(interface{ SliceLength(value, max uint32) }); ok {
+		r.SliceLength(count, maxBlobStatusHashes)
+		*x = make([]uint64, count)
+	}
+	for i := range *x {
+		io.Uint64(&(*x)[i])
+	}
 }
