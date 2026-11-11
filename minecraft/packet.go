@@ -82,8 +82,16 @@ func (p *packetData) decode(conn *Conn) (pks []packet.Packet, err error) {
 	}
 
 	defer func() {
-		if recoveredErr := recover(); recoveredErr != nil {
-			err = fmt.Errorf("decode packet %T: %w", pk, recoveredErr.(error))
+		if recovered := recover(); recovered != nil {
+			// Decoding panics with an error almost everywhere, but a few helpers
+			// (Bitset, InputFlags) panic with a string. Asserting .(error) here
+			// would panic again inside this deferred call, where nothing
+			// recovers it, and take the whole process down.
+			recoveredErr, ok := recovered.(error)
+			if !ok {
+				recoveredErr = fmt.Errorf("%v", recovered)
+			}
+			err = fmt.Errorf("decode packet %T: %w", pk, recoveredErr)
 		}
 		if err != nil && !errors.Is(err, unknownPacketError{}) && conn.disconnectOnInvalidPacket {
 			_ = conn.Close()
