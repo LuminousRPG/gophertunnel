@@ -46,6 +46,12 @@ type ListenConfig struct {
 	// account.
 	AuthenticationDisabled bool
 
+	// GuestIdentity, if non-nil, admits players that are not logged in with XBOX Live while authentication
+	// is enabled. Nothing such a player claims about itself is verified, so it never joins as the identity it
+	// claimed: GuestIdentity returns the identity it joins with instead, or an error to refuse it, whose
+	// text the player is shown.
+	GuestIdentity func(addr net.Addr, claimed login.IdentityData, data login.ClientData, auth login.AuthResult) (login.IdentityData, error)
+
 	// DisablePacketEncryption disables packet encryption for accepted connections.
 	// Authentication is unaffected. Only use this on trusted networks.
 	DisablePacketEncryption bool
@@ -482,6 +488,7 @@ func (listener *Listener) createConn(netConn net.Conn) {
 	conn.resourcePackDelivery = listener.cfg.ResourcePackDelivery.normalized()
 	conn.gameData.WorldName = listener.status().ServerName
 	conn.authEnabled = !listener.cfg.AuthenticationDisabled
+	conn.guestIdentity = listener.cfg.GuestIdentity
 	conn.verifier = listener.verifier
 	conn.disconnectOnUnknownPacket = !listener.cfg.AllowUnknownPackets
 	conn.disconnectOnInvalidPacket = !listener.cfg.AllowInvalidPackets

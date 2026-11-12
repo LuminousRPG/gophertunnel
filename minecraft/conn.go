@@ -88,6 +88,10 @@ type Conn struct {
 	conn        net.Conn
 	log         *slog.Logger
 	authEnabled bool
+	// guestIdentity gives a player not logged in with XBOX Live the identity it
+	// joins with (ListenConfig.GuestIdentity); guest is set once it did.
+	guestIdentity func(addr net.Addr, claimed login.IdentityData, data login.ClientData, auth login.AuthResult) (login.IdentityData, error)
+	guest         bool
 
 	proto                Protocol
 	acceptedProto        []Protocol
@@ -277,7 +281,13 @@ func (conn *Conn) ClientData() login.ClientData {
 
 // Authenticated returns true if the connection was authenticated through XBOX Live services.
 func (conn *Conn) Authenticated() bool {
-	return conn.IdentityData().XUID != ""
+	return !conn.guest && conn.IdentityData().XUID != ""
+}
+
+// Guest returns true if the connection was not authenticated through XBOX Live services and joins with the
+// identity ListenConfig.GuestIdentity gave it.
+func (conn *Conn) Guest() bool {
+	return conn.guest
 }
 
 // GameData returns specific game data set to the connection for the player to be initialised with. If the
@@ -873,9 +883,21 @@ func (conn *Conn) handleLogin(pk *packet.Login) error {
 	}
 
 	// Make sure the player is logged in with XBOX Live when necessary.
-	if !authResult.XBOXLiveAuthenticated && conn.authEnabled {
+	switch {
+	case authResult.XBOXLiveAuthenticated:
+	case conn.authEnabled && conn.guestIdentity != nil:
+		// A guest never keeps the identity it claimed: nothing of it was verified.
+		identity, err := conn.guestIdentity(conn.RemoteAddr(), conn.identityData, conn.clientData, authResult)
+		if err != nil {
+			_ = conn.WritePacket(&packet.Disconnect{Reason: packet.DisconnectReasonKicked, Message: err.Error()})
+			return fmt.Errorf("guest refused: %w", err)
+		}
+		conn.identityData, conn.guest = identity, true
+	case conn.authEnabled:
 		_ = conn.WritePacket(&packet.Disconnect{Message: text.Colourf("<red>You must be logged in with XBOX Live to join.</red>")})
 		return fmt.Errorf("client was not authenticated to XBOX Live")
+	case authResult.IdentityErr != nil:
+		return fmt.Errorf("parse login request: %w", authResult.IdentityErr)
 	}
 	if v, ok := conn.conn.(publicKeyVerifierConn); ok {
 		if err := v.VerifyPublicKey(authResult.PublicKey); err != nil {

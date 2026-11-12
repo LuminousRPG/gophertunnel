@@ -79,6 +79,16 @@ var mojangKey = new(ecdsa.PublicKey)
 type AuthResult struct {
 	PublicKey             *ecdsa.PublicKey
 	XBOXLiveAuthenticated bool
+	// AuthenticationType is the authentication type the client stated: 0 for XBOX Live, 1 for a guest and 2
+	// for a self-signed login.
+	AuthenticationType uint8
+	// VerifyErr is why the multiplayer token of a request that was not authenticated failed verification, if
+	// it did. Such a request is parsed without verification instead.
+	VerifyErr error
+	// IdentityErr is set instead of failing Parse when the identity data of a request that was not
+	// authenticated does not validate. Nothing about such an identity was verified, so a caller that
+	// replaces it (as for guests) may ignore it; any other caller must refuse the request.
+	IdentityErr error
 }
 
 // Parse parses and verifies the login request passed. The AuthResult returned holds the ecdsa.PublicKey that
@@ -103,15 +113,26 @@ func Parse(request []byte, verifier *oidc.IDTokenVerifier) (IdentityData, Client
 	var (
 		authenticated bool
 		t             = time.Now()
+		verifyErr     error
+		identityErr   error
+		idt           *oidc.IDToken
 	)
-	switch {
-	case verifier != nil && req.Token != "":
+	if verifier != nil && req.Token != "" {
 		// The context here is used for making requests via remote key set, which does not normally
 		// occur in this case since we use a custom-made OIDC verifier that has already static key set included.
-		idt, err := verifier.Verify(context.Background(), req.Token)
-		if err != nil {
-			return iData, cData, res, fmt.Errorf("verify ID token: %w", err)
+		if idt, err = verifier.Verify(context.Background(), req.Token); err != nil {
+			verifyErr = fmt.Errorf("verify ID token: %w", err)
+			if req.AuthenticationType == 0 {
+				// A client that says it is logged in with XBOX Live must prove it, rather than join as a
+				// player that is not (and miss everything its account has).
+				return iData, cData, res, verifyErr
+			}
+			// A guest's token that does not verify proves nothing: the request is parsed as one that was
+			// not authenticated, which the caller refuses unless it admits such players.
 		}
+	}
+	switch {
+	case idt != nil:
 		var claims tokenClaims
 		if err := idt.Claims(&claims); err != nil {
 			return iData, cData, res, fmt.Errorf("parse ID token: %w", err)
@@ -135,7 +156,10 @@ func Parse(request []byte, verifier *oidc.IDTokenVerifier) (IdentityData, Client
 			}
 		}
 		if err := iData.Validate(); err != nil {
-			return iData, cData, res, fmt.Errorf("validate identity data: %w", err)
+			if authenticated {
+				return iData, cData, res, fmt.Errorf("validate identity data: %w", err)
+			}
+			identityErr = fmt.Errorf("validate identity data: %w", err)
 		}
 	case req.Token != "":
 		// Parse the token without verification to extract identity and the public key for encryption.
@@ -152,7 +176,7 @@ func Parse(request []byte, verifier *oidc.IDTokenVerifier) (IdentityData, Client
 		}
 		iData = claims.identityData()
 		if err := iData.Validate(); err != nil {
-			return iData, cData, res, fmt.Errorf("validate identity data: %w", err)
+			identityErr = fmt.Errorf("validate identity data: %w", err)
 		}
 	default:
 		legacyID, legacyKey, legacyAuthed, err := parseLegacyChain(req.Certificate.Chain, t)
@@ -175,7 +199,13 @@ func Parse(request []byte, verifier *oidc.IDTokenVerifier) (IdentityData, Client
 	if err := cData.Validate(); err != nil {
 		return iData, cData, res, fmt.Errorf("validate client data: %w", err)
 	}
-	return iData, cData, AuthResult{PublicKey: key, XBOXLiveAuthenticated: authenticated}, nil
+	return iData, cData, AuthResult{
+		PublicKey:             key,
+		XBOXLiveAuthenticated: authenticated,
+		AuthenticationType:    req.AuthenticationType,
+		VerifyErr:             verifyErr,
+		IdentityErr:           identityErr,
+	}, nil
 }
 
 // parseLegacyChain verifies the legacy Mojang chain and returns IdentityData from extraData,
@@ -273,11 +303,8 @@ func parseLoginRequest(requestData []byte) (*request, error) {
 		r.request.Certificate.Chain = r.Chain
 	}
 
-	// Then check if the authentication type is guest mode.
-	if r.AuthenticationType == 1 {
-		return nil, fmt.Errorf("guest authentication is not supported")
-	}
-
+	// A guest login (AuthenticationType 1) is parsed like any other request that was not authenticated
+	// with XBOX Live; the listener decides whether to admit it.
 	var rawLength int32
 	if err := binary.Read(buf, binary.LittleEndian, &rawLength); err != nil {
 		return nil, fmt.Errorf("read raw token length: %w", err)
@@ -468,6 +495,12 @@ func (tc tokenClaims) identityData() IdentityData {
 		PlayFabID:      tc.PlayFabID,
 		PlayFabTitleID: tc.PlayFabTitleID,
 	}
+}
+
+// IdentityFromXUID returns the UUID a client logged in with XBOX Live as xuid
+// joins with.
+func IdentityFromXUID(xuid string) uuid.UUID {
+	return identityFromXUID(xuid)
 }
 
 // identityFromXUID returns the UUID derived from the player's XUID claimed
